@@ -39,38 +39,55 @@ final class SimulatorStore: ObservableObject {
             isLoading = false
         }
 
+        async let simctlResult = Shell.checked(Shell.xcrunPath, ["simctl", "list", "devices", "available", "-j"])
+        async let physicalDevices = Self.fetchPhysicalDevices()
+        async let androidDevices = AndroidSDK.fetchDevices()
+
+        var parsed: [RuntimeGroup] = []
+        var simctlError: String?
         do {
-            async let simctlResult = Shell.checked(Shell.xcrunPath, ["simctl", "list", "devices", "available", "-j"])
-            async let physicalDevices = Self.fetchPhysicalDevices()
-
             let simctlOutput = try await simctlResult
-            var parsed = try Self.parse(simctlOutput.stdout)
-            let devices = await physicalDevices
-            if !devices.isEmpty {
-                parsed.insert(RuntimeGroup(id: "physical-devices", platform: "Devices", version: "", simulators: devices), at: 0)
-                knownDeviceUDIDs.formUnion(devices.map(\.udid))
-            }
-            if parsed != groups { groups = parsed }
-            lastError = nil
-
-            let selectionIsKnownDevice = selectedUDID.map { knownDeviceUDIDs.contains($0) } ?? false
-            if selected == nil, !selectionIsKnownDevice, !parsed.isEmpty {
-                let all = parsed.flatMap(\.simulators).filter { !$0.isPhysical }
-                let fallback = all.first(where: { $0.isBooted })
-                    ?? all.first(where: { $0.platform == "iOS" && $0.name.hasPrefix("iPhone") })
-                    ?? all.first
-                selectedUDID = fallback?.udid
-            }
+            parsed = try Self.parse(simctlOutput.stdout)
         } catch {
-            lastError = "Couldn't list simulators. Is Xcode installed and selected (xcode-select)? \(error.localizedDescription)"
+            simctlError = "Couldn't list simulators. Is Xcode installed and selected (xcode-select)? \(error.localizedDescription)"
+        }
+
+        let android = await androidDevices
+        if !android.isEmpty {
+            parsed.insert(RuntimeGroup(id: "android", platform: "Android", version: "", simulators: android), at: 0)
+            knownDeviceUDIDs.formUnion(android.map(\.udid))
+        }
+        let devices = await physicalDevices
+        if !devices.isEmpty {
+            parsed.insert(RuntimeGroup(id: "physical-devices", platform: "Devices", version: "", simulators: devices), at: 0)
+            knownDeviceUDIDs.formUnion(devices.map(\.udid))
+        }
+        if parsed != groups { groups = parsed }
+        // Only complain about simctl when there's nothing else to run on.
+        lastError = parsed.isEmpty ? simctlError : nil
+
+        let selectionIsKnownDevice = selectedUDID.map { knownDeviceUDIDs.contains($0) } ?? false
+        if selected == nil, !selectionIsKnownDevice, !parsed.isEmpty {
+            let everything = parsed.flatMap(\.simulators)
+            let simulators = everything.filter { $0.kind == .simulator }
+            let fallback = simulators.first(where: { $0.isBooted })
+                ?? simulators.first(where: { $0.platform == "iOS" && $0.name.hasPrefix("iPhone") })
+                ?? simulators.first
+                ?? everything.first
+            selectedUDID = fallback?.udid
         }
     }
 
     func boot(_ simulator: Simulator) async {
         busyUDIDs.insert(simulator.udid)
         do {
-            try await Shell.checked(Shell.xcrunPath, ["simctl", "boot", simulator.udid])
-            await Self.openSimulatorApp(udid: simulator.udid)
+            if simulator.kind == .androidEmulator, let avd = simulator.avdName {
+                try AndroidSDK.startEmulator(avd)
+                _ = try await AndroidSDK.waitForEmulator(avd)
+            } else {
+                try await Shell.checked(Shell.xcrunPath, ["simctl", "boot", simulator.udid])
+                await Self.openSimulatorApp(udid: simulator.udid)
+            }
         } catch {
             lastError = error.localizedDescription
         }
@@ -81,7 +98,11 @@ final class SimulatorStore: ObservableObject {
     func shutdown(_ simulator: Simulator) async {
         busyUDIDs.insert(simulator.udid)
         do {
-            try await Shell.checked(Shell.xcrunPath, ["simctl", "shutdown", simulator.udid])
+            if simulator.kind == .androidEmulator, let serial = simulator.serial {
+                try await AndroidSDK.stopEmulator(serial: serial)
+            } else {
+                try await Shell.checked(Shell.xcrunPath, ["simctl", "shutdown", simulator.udid])
+            }
         } catch {
             lastError = error.localizedDescription
         }

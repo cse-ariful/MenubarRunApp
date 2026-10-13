@@ -284,9 +284,9 @@ struct MenuContentView: View {
 
     private var emptyMessage: String {
         if projects.folders.isEmpty {
-            return "No projects yet. Add a folder that contains your Xcode projects (.xcodeproj / .xcworkspace)."
+            return "No projects yet. Add a folder with your Xcode, Flutter or Android projects. They're detected automatically."
         }
-        return projects.isScanning ? "Scanning folders…" : "No Xcode projects found in the tracked folders."
+        return projects.isScanning ? "Scanning folders…" : "No Xcode, Flutter or Android projects found in the tracked folders."
     }
 }
 
@@ -375,6 +375,7 @@ private struct SimulatorRow: View {
     private var deviceSymbol: String {
         guard let sim = simulators.selected else { return "iphone" }
         switch sim.platform {
+        case "Android": return "candybarphone"
         case "watchOS": return "applewatch"
         case "tvOS": return "appletv"
         case "visionOS": return "eyeglasses"
@@ -430,7 +431,7 @@ private struct ProjectRow: View {
             // Shows a drag handle on hover: hold anywhere on the row (outside buttons), then drag to reorder.
             Image(systemName: hovering || isDragging
                   ? "line.3.horizontal"
-                  : (project.kind == .workspace ? "square.stack.3d.up.fill" : "hammer.fill"))
+                  : project.symbolName)
                 .font(.title3)
                 .foregroundStyle(.secondary)
                 .frame(width: 28, height: 28)
@@ -446,7 +447,11 @@ private struct ProjectRow: View {
                     .lineLimit(1)
 
                 HStack(spacing: 4) {
-                    schemeMenu
+                    if project.isXcode {
+                        schemeMenu
+                    } else {
+                        Text(project.kind == .android ? "Android · \(project.androidModule ?? "app")" : "Flutter")
+                    }
                     Text("·").foregroundStyle(.tertiary)
                     Text(project.directory.path.abbreviatingWithTilde)
                         .lineLimit(1)
@@ -485,8 +490,8 @@ private struct ProjectRow: View {
 
     @ViewBuilder
     private var actionItems: some View {
-        if let scheme, let sim = simulators.selected, !runner.isRunning {
-            Button("Run \(scheme) on \(sim.name)") { run() }
+        if runBlocker == nil, let sim = simulators.selected {
+            Button("Run \(scheme ?? project.name) on \(sim.name)") { run() }
             Divider()
         }
         Button("Move to Top") { withAnimation { projects.moveToTop(project) } }
@@ -548,6 +553,30 @@ private struct ProjectRow: View {
     @ViewBuilder
     private var runButton: some View {
         if isRunningThis {
+            if runner.canHotReload {
+                // Flutter session attached: hot reload / hot restart.
+                Button {
+                    runner.hotReload()
+                } label: {
+                    Image(systemName: "bolt.circle.fill")
+                        .font(.system(size: 22))
+                        .foregroundStyle(.yellow)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut("r", modifiers: .command)
+                .help("Hot reload (⌘R)")
+
+                Button {
+                    runner.hotRestart()
+                } label: {
+                    Image(systemName: "arrow.clockwise.circle.fill")
+                        .font(.system(size: 22))
+                        .foregroundStyle(.orange)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+                .help("Hot restart (⇧⌘R)")
+            }
             Button {
                 runner.stop()
             } label: {
@@ -568,20 +597,22 @@ private struct ProjectRow: View {
             }
             .buttonStyle(.plain)
             .disabled(runBlocker != nil)
-            .help(runBlocker ?? "Run \(scheme ?? "") on \(simulators.selected?.name ?? "")")
+            .help(runBlocker ?? "Run \(scheme ?? project.name) on \(simulators.selected?.name ?? "")")
         }
     }
 
     private var runBlocker: String? {
         if runner.isRunning { return "Another run is in progress" }
-        if simulators.selected == nil { return "Select a simulator or device first" }
-        if scheme == nil { return "Select a scheme first" }
+        guard let destination = simulators.selected else { return "Select a simulator or device first" }
+        if !project.supports(destination) { return project.unsupportedDestinationHint }
+        if destination.isOffline { return "\(destination.name) is offline" }
+        if project.isXcode, scheme == nil { return "Select a scheme first" }
         return nil
     }
 
     private func run() {
-        guard let simulator = simulators.selected, let scheme else { return }
-        runner.run(project: project, scheme: scheme, simulator: simulator)
+        guard runBlocker == nil, let simulator = simulators.selected else { return }
+        runner.run(project: project, scheme: project.isXcode ? scheme : nil, simulator: simulator)
     }
 
     private var statusLine: some View {
@@ -591,7 +622,7 @@ private struct ProjectRow: View {
                 Text(runner.phase.title)
                 if let started = runner.startedAt {
                     ElapsedText(start: started, end: runner.finishedAt)
-                        .monospacedDigit()
+                        .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
                 if runner.errorCount > 0 {
@@ -818,6 +849,8 @@ private struct PhaseIcon: View {
             Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
         case .cancelled:
             Image(systemName: "stop.circle.fill").foregroundStyle(.orange)
+        case .attached:
+            Image(systemName: "bolt.fill").foregroundStyle(.yellow)
         default:
             ProgressView().controlSize(.mini)
         }

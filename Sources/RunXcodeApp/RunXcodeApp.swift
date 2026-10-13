@@ -5,6 +5,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Menu bar only: no Dock icon, even when launched via `swift run`.
         NSApp.setActivationPolicy(.accessory)
+        // Load the login-shell environment (PATH, JAVA_HOME, ANDROID_HOME…) off the main thread.
+        DispatchQueue.global(qos: .userInitiated).async { _ = Shell.userEnvironment }
     }
 }
 

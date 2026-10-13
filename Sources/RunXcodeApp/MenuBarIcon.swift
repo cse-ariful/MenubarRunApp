@@ -8,7 +8,7 @@ enum MenuBarIcon {
     static func image(for phase: RunPhase) -> NSImage {
         let badge: String
         switch phase {
-        case .idle, .succeeded, .cancelled: badge = "play.fill"
+        case .idle, .succeeded, .cancelled, .attached: badge = "play.fill"
         case .failed: badge = "exclamationmark"
         default: badge = "hourglass"
         }

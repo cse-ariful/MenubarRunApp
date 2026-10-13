@@ -1,6 +1,6 @@
 # RunXcodeApp
 
-A macOS menu bar app that builds an Xcode project and runs it on a simulator you pick, without opening Xcode.
+A macOS menu bar app that builds and runs your **Xcode**, **Flutter** and **Android** projects on a simulator, emulator or device you pick, without opening Xcode or Android Studio.
 
 ## Layout
 
@@ -18,6 +18,20 @@ The popup is a single list:
 - **Saved:** order, archived projects and removed projects are all remembered across restarts.
 
 The row menu also has Open in Xcode, Reveal in Finder and Reload Schemes.
+
+## Supported projects (auto-detected)
+
+| Type | Detected when | Runs on | How it runs |
+| --- | --- | --- | --- |
+| Xcode | `.xcworkspace` or `.xcodeproj` (a workspace wins over a project in the same folder) | iOS, tvOS, watchOS and visionOS simulators; Apple devices | `xcodebuild`, then `simctl` or `devicectl` install and launch |
+| Flutter | `pubspec.yaml` depends on `sdk: flutter` and `lib/main.dart` exists | iOS simulators, Apple devices, Android emulators and devices | `flutter run -d <device>`. Hot reload ⚡ (⌘R) and hot restart (⇧⌘R) stay available while it runs, and ■ stops it |
+| Android | Gradle root (`settings.gradle(.kts)`) with a module applying `com.android.application` | Android emulators and devices (USB or wireless debugging) | `./gradlew :app:installDebug`, then `adb` launches the app |
+
+A Flutter app's `ios/` and `android/` folders aren't listed as separate projects. Flutter packages and plugins (no `lib/main.dart`) are skipped, but their `example/` apps are found. Android emulators that aren't running are listed too, and are started automatically when you press ▶.
+
+**Toolchains:** the app reads `PATH`, `JAVA_HOME` and `ANDROID_HOME` from your login shell, so `flutter`, `adb` and `emulator` resolve the same way they do in Terminal. It falls back to `~/Library/Android/sdk` and Android Studio's bundled JDK.
+
+**Android limitation:** the debug variant is always used. Projects with product flavors (for example `installFreeDebug`) aren't supported yet.
 
 ## Features
 
@@ -111,5 +125,6 @@ The cask's source of truth is `packaging/homebrew/runxcodeapp.rb`. Edit it there
 | `MenuContentView.swift` | Menu bar popover UI |
 | `SimulatorStore.swift` | `simctl` listing, polling, boot and shutdown |
 | `ProjectStore.swift` | Tracked folders, project scanning, schemes |
-| `BuildRunner.swift` | Build, install and launch pipeline, plus the log |
+| `BuildRunner.swift` | Build and run pipelines for Xcode, Flutter and Android, plus the log |
+| `AndroidSDK.swift` | adb and emulator discovery; starting and stopping emulators |
 | `Shell.swift` | Process helpers (buffered and streaming) |

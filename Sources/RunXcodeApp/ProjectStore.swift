@@ -53,7 +53,7 @@ final class ProjectStore: ObservableObject {
     func presentAddPanel() {
         let panel = NSOpenPanel()
         panel.title = "Add Apple Projects Folder"
-        panel.message = "Choose folders containing .xcodeproj or .xcworkspace files (or pick a project directly)."
+        panel.message = "Choose folders containing Xcode, Flutter or Android projects (or pick a project directly)."
         panel.prompt = "Add"
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
@@ -231,6 +231,7 @@ final class ProjectStore: ObservableObject {
     // MARK: - Schemes
 
     func loadSchemes(for project: XcodeProject, force: Bool = false) async {
+        guard project.isXcode else { return }  // Flutter/Android don't use Xcode schemes
         if !force, schemes[project.id] != nil { return }
         guard !loadingSchemes.contains(project.id) else { return }
         loadingSchemes.insert(project.id)
@@ -279,7 +280,7 @@ final class ProjectStore: ObservableObject {
     }
 }
 
-/// Walks tracked folders looking for Xcode workspaces and projects.
+/// Walks tracked folders looking for Xcode workspaces/projects, Flutter apps and Android (Gradle) apps.
 enum ProjectScanner {
     private static let skippedDirectories: Set<String> = [
         "Pods", "Carthage", "node_modules", "DerivedData", "build", "Build",
@@ -314,6 +315,17 @@ enum ProjectScanner {
 
     private static func walk(_ directory: URL, depth: Int, maxDepth: Int, into found: inout [XcodeProject]) {
         guard depth <= maxDepth else { return }
+
+        // Flutter app: its ios/ and android/ folders belong to it, so don't list them separately.
+        if isFlutterApp(directory) {
+            found.append(XcodeProject(url: directory, kind: .flutter))
+            return
+        }
+        // Android app. Keep walking afterwards so e.g. a Kotlin Multiplatform iosApp/ is found too.
+        let androidModule = androidAppModule(in: directory)
+        if let androidModule {
+            found.append(XcodeProject(url: directory, kind: .android, androidModule: androidModule))
+        }
         let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey]
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]
@@ -346,7 +358,52 @@ enum ProjectScanner {
             return
         }
         for subdirectory in subdirectories {
+            // Gradle modules of an Android app can't be apps themselves.
+            if let androidModule,
+               subdirectory.lastPathComponent == androidModule || androidModuleNames.contains(subdirectory.lastPathComponent) {
+                continue
+            }
             walk(subdirectory, depth: depth + 1, maxDepth: maxDepth, into: &found)
         }
+    }
+
+    private static let androidModuleNames: Set<String> = ["gradle", "buildSrc"]
+
+    // MARK: - Flutter / Android detection
+
+    /// A Flutter *app* (not a package/plugin): pubspec.yaml depends on the Flutter SDK and lib/main.dart exists.
+    static func isFlutterApp(_ directory: URL) -> Bool {
+        let pubspec = directory.appendingPathComponent("pubspec.yaml")
+        guard let text = try? String(contentsOf: pubspec, encoding: .utf8),
+              text.contains("sdk: flutter") else { return false }
+        return FileManager.default.fileExists(atPath: directory.appendingPathComponent("lib/main.dart").path)
+    }
+
+    /// Returns the Gradle module that applies the Android application plugin, if `directory` is a Gradle root.
+    static func androidAppModule(in directory: URL) -> String? {
+        let fm = FileManager.default
+        let isGradleRoot = ["settings.gradle", "settings.gradle.kts"]
+            .contains { fm.fileExists(atPath: directory.appendingPathComponent($0).path) }
+        guard isGradleRoot,
+              let children = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey],
+                                                         options: [.skipsHiddenFiles]) else { return nil }
+        var modules: [String] = []
+        for child in children {
+            for file in ["build.gradle.kts", "build.gradle"] {
+                guard let text = try? String(contentsOf: child.appendingPathComponent(file), encoding: .utf8) else { continue }
+                if appliesAndroidApplication(text) {
+                    modules.append(child.lastPathComponent)
+                    break
+                }
+            }
+        }
+        if modules.contains("app") { return "app" }
+        return modules.sorted().first
+    }
+
+    private static func appliesAndroidApplication(_ buildScript: String) -> Bool {
+        buildScript.contains("com.android.application")        // plugins { id("com.android.application") } / apply plugin
+            || buildScript.contains("plugins.android.application") // version catalog: alias(libs.plugins.android.application)
+            || buildScript.contains("plugins.androidApplication")  // KMP templates: alias(libs.plugins.androidApplication)
     }
 }
