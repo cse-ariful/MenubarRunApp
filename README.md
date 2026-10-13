@@ -11,7 +11,12 @@ The popup, top to bottom:
 3. **Actions** for the selected project:
    - **Run on <device>** (⌘R) or **Stop** (⌘.), plus **Hot Reload** (⌘R) and hot restart (⇧⌘R) for Flutter
    - **Show / Hide Logs**, the live build log for this project
-   - **Screenshot**, which saves the target simulator, emulator or Android device's screen to the Desktop and copies it to the clipboard (physical Apple devices aren't supported)
+   - **Screenshot**, which saves the target device's screen to `~/Pictures/RunXcodeApp` and copies it to the clipboard. Simulators, Android emulators and Android phones work out of the box. **Physical iPhones** (USB or Wi-Fi) need [pymobiledevice3](https://github.com/doronz88/pymobiledevice3), because Apple doesn't ship a command-line screenshot tool (Xcode uses private frameworks). Set it up once:
+     ```bash
+     brew install pipx && pipx install pymobiledevice3
+     sudo pymobiledevice3 remote tunneld   # keep running; iOS 17+ needs this tunnel, including over Wi-Fi
+     ```
+     libimobiledevice's `idevicescreenshot` is also tried if it's installed (mainly works for iOS 16 and earlier).
    - **Open in Xcode / Android Studio / VS Code**, **Reveal in Finder**, **Open in Terminal**
    - **Reload Schemes** (Xcode) or **Open Log File**
    - For Xcode projects, the scheme picker sits in the Actions header.

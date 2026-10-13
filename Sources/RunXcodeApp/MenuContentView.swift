@@ -533,9 +533,7 @@ private struct ActionsSection: View {
                            disabled: isCapturing || !DeviceTools.canScreenshot(destination)) {
                     takeScreenshot()
                 }
-                .help(DeviceTools.canScreenshot(destination)
-                      ? "Save a screenshot of \(destination?.name ?? "the device") to the Desktop and copy it"
-                      : "Boot the target device first (physical Apple devices aren't supported)")
+                .help("Save a screenshot of \(destination?.name ?? "the device") to Pictures › RunXcodeApp and copy it")
                 ActionTile(title: DeviceTools.ideAction(for: project).title,
                            systemImage: DeviceTools.ideAction(for: project).symbol) {
                     DeviceTools.openInIDE(project)
@@ -564,7 +562,9 @@ private struct ActionsSection: View {
                     Label(screenshotMessage, systemImage: lastScreenshot == nil ? "exclamationmark.triangle" : "checkmark.circle")
                         .font(.caption)
                         .foregroundStyle(lastScreenshot == nil ? Color.red : Color.green)
-                        .lineLimit(2)
+                        .lineLimit(6)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                 }
                 .buttonStyle(.plain)
                 .help(lastScreenshot == nil ? "" : "Reveal in Finder")
@@ -657,7 +657,7 @@ private struct ActionsSection: View {
                 let url = try await DeviceTools.screenshot(of: destination, label: "\(project.name) – \(destination.name)")
                 DeviceTools.copyImage(at: url)
                 lastScreenshot = url
-                screenshotMessage = "Saved \(url.lastPathComponent) to Desktop and copied it"
+                screenshotMessage = "Saved to Pictures › RunXcodeApp and copied. Click to reveal."
             } catch {
                 lastScreenshot = nil
                 screenshotMessage = error.localizedDescription
