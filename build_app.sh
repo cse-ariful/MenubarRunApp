@@ -3,7 +3,8 @@
 #   ./build_app.sh            build only
 #   ./build_app.sh --run      build and launch
 #   ./build_app.sh --install  build, copy to /Applications and launch
-#   ./build_app.sh --zip      build and create build/RunXcodeApp-<version>.zip (for releases)
+#   ./build_app.sh --zip      build and create build/RunXcodeApp-<version>.zip
+#   ./build_app.sh --dmg      build and create build/RunXcodeApp-<version>.dmg (drag-to-Applications disk image)
 #
 # Environment:
 #   UNIVERSAL=1        build for both Apple Silicon and Intel
@@ -54,6 +55,18 @@ case "${1:-}" in
     cp -R "$APP" /Applications/
     open "/Applications/${APP_NAME}.app"
     echo "✓ Installed to /Applications/${APP_NAME}.app"
+    ;;
+  --dmg)
+    DMG="build/${APP_NAME}-${VERSION_STRING}.dmg"
+    STAGE="build/dmg-staging"
+    rm -rf "$STAGE" "$DMG"
+    mkdir -p "$STAGE"
+    cp -R "$APP" "$STAGE/"
+    ln -s /Applications "$STAGE/Applications"   # so users can drag the app into Applications
+    hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -fs HFS+ -format UDZO -ov "$DMG" >/dev/null
+    rm -rf "$STAGE"
+    echo "✓ $DMG"
+    shasum -a 256 "$DMG"
     ;;
   --zip)
     ZIP="build/${APP_NAME}-${VERSION_STRING}.zip"

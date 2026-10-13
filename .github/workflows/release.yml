@@ -44,28 +44,28 @@ jobs:
         id: v
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build universal app and zip
+      - name: Build universal app and DMG
         if: steps.check.outputs.skip != 'true'
         env:
           UNIVERSAL: "1"
           VERSION: ${{ steps.v.outputs.version }}
           BUILD_NUMBER: ${{ github.run_number }}
-        run: ./build_app.sh --zip
+        run: ./build_app.sh --dmg
 
       - name: Checksum
         if: steps.check.outputs.skip != 'true'
         id: sum
         run: |
-          ZIP="build/RunXcodeApp-${{ steps.v.outputs.version }}.zip"
-          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
-          echo "sha256=$(shasum -a 256 "$ZIP" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          DMG="build/RunXcodeApp-${{ steps.v.outputs.version }}.dmg"
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(shasum -a 256 "$DMG" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub Release
         if: steps.check.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "${{ steps.sum.outputs.zip }}" \
+          gh release create "$GITHUB_REF_NAME" "${{ steps.sum.outputs.dmg }}" \
             --title "RunXcodeApp ${{ steps.v.outputs.version }}" \
             --generate-notes
 

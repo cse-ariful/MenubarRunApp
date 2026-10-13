@@ -79,6 +79,7 @@ The app is ad-hoc signed, not notarized. The cask clears macOS's download quaran
 cd RunXcodeApp
 ./build_app.sh --run        # build ./build/RunXcodeApp.app and launch it
 ./build_app.sh --install    # build, copy to /Applications, launch
+./build_app.sh --dmg        # build ./build/RunXcodeApp-<version>.dmg (drag-to-Applications installer)
 ```
 
 You can also open `Package.swift` in Xcode and press Run. The app only appears in the menu bar, not in the Dock.
@@ -118,12 +119,22 @@ Builds use Xcode's normal DerivedData, so they share the incremental build cache
    ```
    GitHub Actions then:
    - builds a universal (Apple Silicon and Intel) `.app`
-   - attaches `RunXcodeApp-1.0.0.zip` to a GitHub Release
+   - attaches `RunXcodeApp-1.0.0.dmg` to a GitHub Release
    - writes `Casks/runxcodeapp.rb` into the tap with the new version and checksum
 
 For each later release, commit your changes and run `scripts/release.sh <next version>`.
 
 The cask's source of truth is `packaging/homebrew/runxcodeapp.rb`. Edit it there, and the next release copies it to the tap.
+
+## Releasing a DMG
+
+Releases ship as a **DMG**: a disk image with `RunXcodeApp.app` and an Applications shortcut. Homebrew installs from it, and people can also download it from the GitHub Release page and drag the app into Applications.
+
+- **Build one locally:** `UNIVERSAL=1 VERSION=1.0.0 ./build_app.sh --dmg` creates `build/RunXcodeApp-1.0.0.dmg`.
+- **Release from your Mac** (no CI needed): `scripts/manual_release.sh 1.0.0` builds the DMG, creates the GitHub Release with the DMG attached, and updates `Casks/runxcodeapp.rb` in `cse-ariful/homebrew-tap` with the new version and SHA-256.
+- **Release from CI:** `scripts/release.sh 1.0.0` pushes a tag, and GitHub Actions does the same steps.
+
+After either one, users install or upgrade with `brew install --cask cse-ariful/tap/runxcodeapp` or `brew upgrade --cask runxcodeapp`.
 
 ## Notes
 

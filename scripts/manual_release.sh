@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Manual release from your Mac (no GitHub Actions needed):
-#   1. builds a universal RunXcodeApp.app and zips it
-#   2. creates GitHub Release v<version> on MenubarRunApp with the zip attached
+#   1. builds a universal RunXcodeApp.app and packs it into a DMG
+#   2. creates GitHub Release v<version> on MenubarRunApp with the DMG attached
 #   3. writes Casks/runxcodeapp.rb (version + sha256) into the homebrew-tap repo and pushes
 #
 # Usage:  scripts/manual_release.sh 1.0.0
@@ -21,15 +21,15 @@ gh auth status >/dev/null 2>&1 || { echo "✗ Run: gh auth login" >&2; exit 1; }
 git push origin HEAD
 
 echo "→ Building ${VERSION}"
-UNIVERSAL=1 VERSION="$VERSION" ./build_app.sh --zip
-ZIP="build/RunXcodeApp-${VERSION}.zip"
-SHA256="$(shasum -a 256 "$ZIP" | cut -d' ' -f1)"
+UNIVERSAL=1 VERSION="$VERSION" ./build_app.sh --dmg
+DMG="build/RunXcodeApp-${VERSION}.dmg"
+SHA256="$(shasum -a 256 "$DMG" | cut -d' ' -f1)"
 
 echo "→ GitHub Release ${TAG}"
 if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
-  gh release upload "$TAG" "$ZIP" -R "$REPO" --clobber
+  gh release upload "$TAG" "$DMG" -R "$REPO" --clobber
 else
-  gh release create "$TAG" "$ZIP" -R "$REPO" \
+  gh release create "$TAG" "$DMG" -R "$REPO" \
     --target "$(git rev-parse HEAD)" \
     --title "RunXcodeApp ${VERSION}" \
     --generate-notes

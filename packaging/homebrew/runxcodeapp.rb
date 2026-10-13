@@ -5,7 +5,7 @@ cask "runxcodeapp" do
   version "0.0.0"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
 
-  url "https://github.com/cse-ariful/MenubarRunApp/releases/download/v#{version}/RunXcodeApp-#{version}.zip"
+  url "https://github.com/cse-ariful/MenubarRunApp/releases/download/v#{version}/RunXcodeApp-#{version}.dmg"
   name "RunXcodeApp"
   desc "Menu bar app to build and run Xcode projects on simulators and devices"
   homepage "https://github.com/cse-ariful/MenubarRunApp"
