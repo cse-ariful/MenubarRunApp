@@ -8,11 +8,10 @@ enum DeviceTools {
     /// Any destination can be tried; `screenshot(of:label:)` explains what's missing if it can't.
     static func canScreenshot(_ destination: Simulator?) -> Bool { destination != nil }
 
-    /// Folder screenshots are saved to (~/Pictures/RunXcodeApp). Not the Desktop: macOS asks for
-    /// permission before an app writes there, and a missed prompt makes every capture fail.
+    /// Screenshots are saved to the Desktop. (The first time, macOS may ask to allow
+    /// RunXcodeApp to access the Desktop folder; it must be allowed for captures to save.)
     static var screenshotsFolder: URL {
-        let pictures = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0]
-        return pictures.appendingPathComponent("RunXcodeApp", isDirectory: true)
+        FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask)[0]
     }
 
     /// Saves a PNG of the destination's screen and returns its URL.

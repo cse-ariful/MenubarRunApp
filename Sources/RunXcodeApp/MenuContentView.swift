@@ -533,7 +533,7 @@ private struct ActionsSection: View {
                            disabled: isCapturing || !DeviceTools.canScreenshot(destination)) {
                     takeScreenshot()
                 }
-                .help("Save a screenshot of \(destination?.name ?? "the device") to Pictures › RunXcodeApp and copy it")
+                .help("Save a screenshot of \(destination?.name ?? "the device") to the Desktop and copy it")
                 ActionTile(title: DeviceTools.ideAction(for: project).title,
                            systemImage: DeviceTools.ideAction(for: project).symbol) {
                     DeviceTools.openInIDE(project)
@@ -657,7 +657,7 @@ private struct ActionsSection: View {
                 let url = try await DeviceTools.screenshot(of: destination, label: "\(project.name) – \(destination.name)")
                 DeviceTools.copyImage(at: url)
                 lastScreenshot = url
-                screenshotMessage = "Saved to Pictures › RunXcodeApp and copied. Click to reveal."
+                screenshotMessage = "Saved to Desktop and copied. Click to reveal."
             } catch {
                 lastScreenshot = nil
                 screenshotMessage = error.localizedDescription

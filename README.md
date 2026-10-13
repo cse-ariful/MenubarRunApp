@@ -11,7 +11,7 @@ The popup, top to bottom:
 3. **Actions** for the selected project:
    - **Run on <device>** (⌘R) or **Stop** (⌘.), plus **Hot Reload** (⌘R) and hot restart (⇧⌘R) for Flutter
    - **Show / Hide Logs**, the live build log for this project
-   - **Screenshot**, which saves the target device's screen to `~/Pictures/RunXcodeApp` and copies it to the clipboard. Simulators, Android emulators and Android phones work out of the box. **Physical iPhones** (USB or Wi-Fi) need [pymobiledevice3](https://github.com/doronz88/pymobiledevice3), because Apple doesn't ship a command-line screenshot tool (Xcode uses private frameworks). Set it up once:
+   - **Screenshot**, which saves the target device's screen to the **Desktop** and copies it to the clipboard (the first time, allow RunXcodeApp to access the Desktop folder if macOS asks; you can change this in System Settings › Privacy & Security › Files and Folders). Simulators, Android emulators and Android phones work out of the box. **Physical iPhones** (USB or Wi-Fi) need [pymobiledevice3](https://github.com/doronz88/pymobiledevice3), because Apple doesn't ship a command-line screenshot tool (Xcode uses private frameworks). Set it up once:
      ```bash
      brew install pipx && pipx install pymobiledevice3
      sudo pymobiledevice3 remote tunneld   # keep running; iOS 17+ needs this tunnel, including over Wi-Fi
