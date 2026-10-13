@@ -131,6 +131,25 @@ final class ProjectStore: ObservableObject {
         rebuild()
     }
 
+    /// Drag-reorder within a section: places `id` at `index` among its section's visible rows.
+    func reorder(_ id: String, toSectionIndex index: Int) {
+        var section = (archivedIDs.contains(id) ? archivedProjects : activeProjects).map(\.id)
+        guard let current = section.firstIndex(of: id) else { return }
+        let target = max(0, min(index, section.count - 1))
+        guard target != current else { return }
+        section.remove(at: current)
+        section.insert(id, at: target)
+        // Reuse this section's slots in the global order so other projects keep their places.
+        let members = Set(section)
+        let slots = order.indices.filter { members.contains(order[$0]) }
+        guard slots.count == section.count else { return }
+        for (slot, projectID) in zip(slots, section) {
+            order[slot] = projectID
+        }
+        persistLayout()
+        rebuild()
+    }
+
     /// Move up (-1) or down (+1) within the project's own section.
     func move(_ project: XcodeProject, by offset: Int) {
         let section = isArchived(project) ? archivedProjects : activeProjects

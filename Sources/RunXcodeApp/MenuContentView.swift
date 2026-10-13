@@ -1,7 +1,6 @@
 import AppKit
 import ServiceManagement
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// The popup is a single list:
 ///   1. selected simulator
@@ -16,7 +15,13 @@ struct MenuContentView: View {
     @AppStorage("showLog") private var showLog = false
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @AppStorage("archivedExpanded") private var archivedExpanded = false
-    @State private var draggingID: String?
+    /// In-popup drag state (a DragGesture, not a system drag session, which is unreliable in menu bar panels).
+    @State private var drag: RowDrag?
+    @State private var rowHeights: [String: CGFloat] = [:]
+    @State private var archivedHeaderFrame: CGRect = .zero
+
+    private let rowSpacing: CGFloat = 2
+    private static let listSpace = "projectList"
 
     private let maxVisibleRows = 7
     private let rowHeight: CGFloat = 54
@@ -38,7 +43,7 @@ struct MenuContentView: View {
         .padding(6)
         .frame(width: 360)
         .onAppear {
-            draggingID = nil
+            drag = nil
             Task { await simulators.refresh(silent: true) }
         }
         .onChange(of: launchAtLogin) { enabled in
@@ -80,7 +85,7 @@ struct MenuContentView: View {
     }
 
     private var projectSections: some View {
-        VStack(spacing: 2) {
+        VStack(spacing: rowSpacing) {
             if projects.activeProjects.isEmpty {
                 Text("All projects are archived.")
                     .font(.caption)
@@ -102,26 +107,52 @@ struct MenuContentView: View {
                 }
             }
         }
-        // Dropping outside a row still ends the drag.
-        .onDrop(of: [UTType.text], delegate: ReorderDropDelegate(onEnter: {}, onDrop: { draggingID = nil }))
+        .coordinateSpace(name: Self.listSpace)
+        .onPreferenceChange(RowHeightKey.self) { rowHeights = $0 }
+        .onPreferenceChange(HeaderFrameKey.self) { archivedHeaderFrame = $0 }
     }
 
     private func draggableRow(_ project: XcodeProject) -> some View {
-        ProjectRow(project: project)
-            .opacity(draggingID == project.id ? 0.4 : 1)
-            .onDrag {
-                draggingID = project.id
-                return NSItemProvider(object: project.id as NSString)
-            }
-            .onDrop(of: [UTType.text], delegate: ReorderDropDelegate(
-                onEnter: {
-                    guard let dragged = draggingID, dragged != project.id else { return }
-                    withAnimation(.easeInOut(duration: 0.15)) {
-                        projects.move(dragged, to: project.id)
+        let isDragged = drag?.id == project.id
+        return ProjectRow(project: project, isDragging: isDragged)
+            .background(
+                GeometryReader { geo in
+                    Color.clear.preference(key: RowHeightKey.self, value: [project.id: geo.size.height])
+                }
+            )
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(Color(nsColor: .windowBackgroundColor))
+                    .shadow(color: .black.opacity(0.25), radius: 6, y: 2)
+                    .opacity(isDragged ? 1 : 0)
+            )
+            .scaleEffect(isDragged ? 1.02 : 1)
+            .offset(y: isDragged ? dragOffset(for: project.id) : 0)
+            .zIndex(isDragged ? 1 : 0)
+            // The dragged row follows the pointer exactly; only its neighbours animate.
+            .transaction { if isDragged { $0.animation = nil } }
+            // Hold (press ~0.3 s) to pick the row up, then drag to reorder.
+            .gesture(
+                LongPressGesture(minimumDuration: 0.3)
+                    .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.listSpace)))
+                    .onChanged { value in
+                        switch value {
+                        case .second(true, nil):
+                            liftRow(project)
+                        case .second(true, let dragValue?):
+                            dragChanged(project, dragValue)
+                        default:
+                            break
+                        }
                     }
-                },
-                onDrop: { draggingID = nil }
-            ))
+                    .onEnded { value in
+                        if case .second(true, let dragValue?) = value {
+                            dragEnded(project, dragValue)
+                        } else {
+                            withAnimation(.easeInOut(duration: 0.15)) { drag = nil }
+                        }
+                    }
+            )
     }
 
     private var archivedHeader: some View {
@@ -137,6 +168,9 @@ struct MenuContentView: View {
                 Text("Archived")
                 Text("\(projects.archivedProjects.count)").foregroundStyle(.tertiary)
                 Spacer()
+                if let hint = sectionChangeHint {
+                    Text(hint).foregroundStyle(Color.accentColor)
+                }
             }
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
@@ -144,18 +178,108 @@ struct MenuContentView: View {
         }
         .buttonStyle(.plain)
         .listRow()
-        .help("Drop a project here to archive it")
-        // Dropping a project on the header archives it.
-        .onDrop(of: [UTType.text], delegate: ReorderDropDelegate(
-            onEnter: {},
-            onDrop: {
-                if let dragged = draggingID,
-                   let project = projects.projects.first(where: { $0.id == dragged }) {
-                    withAnimation { projects.setArchived(project, true) }
-                }
-                draggingID = nil
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(Color.accentColor, lineWidth: 1.5)
+                .opacity(sectionChangeHint == nil ? 0 : 1)
+        )
+        .background(
+            GeometryReader { geo in
+                Color.clear.preference(key: HeaderFrameKey.self, value: geo.frame(in: .named(Self.listSpace)))
             }
-        ))
+        )
+        .help("Drag a project onto this header to archive it")
+    }
+
+    // MARK: - Drag to reorder
+
+    /// Rows of the section the project belongs to, in display order.
+    private func sectionIDs(for id: String) -> [String] {
+        let archived = projects.archivedIDs.contains(id)
+        return (archived ? projects.archivedProjects : projects.activeProjects).map(\.id)
+    }
+
+    private func height(_ id: String) -> CGFloat { rowHeights[id] ?? rowHeight }
+
+    /// Top of a row relative to the first row of its section.
+    private func top(of id: String, in section: [String]) -> CGFloat {
+        var y: CGFloat = 0
+        for other in section {
+            if other == id { break }
+            y += height(other) + rowSpacing
+        }
+        return y
+    }
+
+    /// Visual offset = how far the pointer moved, minus how far the row has already moved in the layout.
+    private func dragOffset(for id: String) -> CGFloat {
+        guard let drag else { return 0 }
+        let layoutShift = top(of: id, in: sectionIDs(for: id)) - drag.startTop
+        return drag.translation - layoutShift
+    }
+
+    /// Hold completed: lift the row (shadow + scale) before it moves, with a trackpad tap.
+    private func liftRow(_ project: XcodeProject) {
+        guard drag == nil else { return }
+        withAnimation(.easeOut(duration: 0.12)) {
+            drag = RowDrag(id: project.id,
+                           startTop: top(of: project.id, in: sectionIDs(for: project.id)),
+                           translation: 0,
+                           location: .zero)
+        }
+        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+    }
+
+    private func dragChanged(_ project: XcodeProject, _ value: DragGesture.Value) {
+        if drag == nil { liftRow(project) }
+        drag?.translation = value.translation.height
+        drag?.location = value.location
+        drag?.moved = true
+        guard let drag else { return }
+
+        // Where the middle of the dragged row is now, within its section.
+        let draggedMid = drag.startTop + drag.translation + height(project.id) / 2
+        let others = sectionIDs(for: project.id).filter { $0 != project.id }
+        var y: CGFloat = 0
+        var targetIndex = others.count
+        for (index, other) in others.enumerated() {
+            if draggedMid < y + height(other) / 2 {
+                targetIndex = index
+                break
+            }
+            y += height(other) + rowSpacing
+        }
+        withAnimation(.easeInOut(duration: 0.15)) {
+            projects.reorder(project.id, toSectionIndex: targetIndex)
+        }
+    }
+
+    private func dragEnded(_ project: XcodeProject, _ value: DragGesture.Value) {
+        if let change = sectionChange(for: project.id, at: value.location) {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                projects.setArchived(project, change)
+            }
+        }
+        withAnimation(.easeInOut(duration: 0.15)) { drag = nil }
+    }
+
+    /// Dragging an active project onto/below the Archived header archives it (true);
+    /// dragging an archived project above the header unarchives it (false).
+    private func sectionChange(for id: String, at location: CGPoint) -> Bool? {
+        guard archivedHeaderFrame != .zero, !projects.archivedProjects.isEmpty else { return nil }
+        let isArchived = projects.archivedIDs.contains(id)
+        if !isArchived, location.y >= archivedHeaderFrame.minY { return true }
+        if isArchived, location.y < archivedHeaderFrame.minY { return false }
+        return nil
+    }
+
+    private var sectionChangeHint: String? {
+        guard let drag, drag.moved else { return nil }
+        switch sectionChange(for: drag.id, at: drag.location) {
+        case true?: return "Drop to archive"
+        case false?: return "Drop to unarchive"
+        case nil: return nil
+        }
     }
 
     private var emptyMessage: String {
@@ -289,6 +413,7 @@ private struct SimulatorRow: View {
 
 private struct ProjectRow: View {
     let project: XcodeProject
+    var isDragging = false
 
     @EnvironmentObject private var simulators: SimulatorStore
     @EnvironmentObject private var projects: ProjectStore
@@ -302,10 +427,18 @@ private struct ProjectRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
-            Image(systemName: project.kind == .workspace ? "square.stack.3d.up.fill" : "hammer.fill")
+            // Shows a drag handle on hover: hold anywhere on the row (outside buttons), then drag to reorder.
+            Image(systemName: hovering || isDragging
+                  ? "line.3.horizontal"
+                  : (project.kind == .workspace ? "square.stack.3d.up.fill" : "hammer.fill"))
                 .font(.title3)
                 .foregroundStyle(.secondary)
-                .frame(width: 28)
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+                .onHover { inside in
+                    if inside { NSCursor.openHand.push() } else { NSCursor.pop() }
+                }
+                .help("Hold, then drag to reorder")
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.name)
@@ -622,15 +755,26 @@ private struct LogPanel: View {
 
 // MARK: - Shared pieces
 
-private struct ReorderDropDelegate: DropDelegate {
-    let onEnter: () -> Void
-    let onDrop: () -> Void
+private struct RowDrag {
+    let id: String
+    let startTop: CGFloat
+    var translation: CGFloat
+    var location: CGPoint
+    var moved = false
+}
 
-    func dropEntered(info: DropInfo) { onEnter() }
-    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
-    func performDrop(info: DropInfo) -> Bool {
-        onDrop()
-        return true
+private struct RowHeightKey: PreferenceKey {
+    static var defaultValue: [String: CGFloat] = [:]
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { $1 })
+    }
+}
+
+private struct HeaderFrameKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if next != .zero { value = next }
     }
 }
 

@@ -12,8 +12,8 @@ The popup is a single list:
 
 **Organizing projects:**
 
-- **Reorder:** drag a row, or use the row's ⋯ menu (shown on hover) or right-click menu: Move to Top, Move Up, Move Down.
-- **Archive:** choose Archive from the row menu, or drag a project onto the **Archived** header. The Archived section sits below your projects and is collapsed by default. Click the header to expand it.
+- **Reorder:** press and hold a project row for about a third of a second. Once it lifts with a shadow (and a trackpad tap), drag it up or down while the others slide out of the way. Hovering shows a ≡ handle as a hint. Move to Top, Move Up and Move Down are also in the row's ⋯ menu and right-click menu.
+- **Archive:** choose Archive from the row menu, or hold a project and drag it onto the **Archived** header and release when it says *Drop to archive*. Drag an archived project above the header to unarchive it. The Archived section is collapsed by default. Click the header to expand it.
 - **Remove:** Remove from List hides a project. To bring it back, open the ⋯ menu on the Add Folder row and go to **Removed Projects**.
 - **Saved:** order, archived projects and removed projects are all remembered across restarts.
 

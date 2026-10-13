@@ -20,16 +20,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # scripts/manual_release.sh publishes the release itself; don't rebuild over it.
+      - name: Skip if the release already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists (manual release) – skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Toolchain
+        if: steps.check.outputs.skip != 'true'
         run: |
           xcodebuild -version
           swift --version
 
       - name: Version from tag
+        if: steps.check.outputs.skip != 'true'
         id: v
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build universal app and zip
+        if: steps.check.outputs.skip != 'true'
         env:
           UNIVERSAL: "1"
           VERSION: ${{ steps.v.outputs.version }}
@@ -37,6 +53,7 @@ jobs:
         run: ./build_app.sh --zip
 
       - name: Checksum
+        if: steps.check.outputs.skip != 'true'
         id: sum
         run: |
           ZIP="build/RunXcodeApp-${{ steps.v.outputs.version }}.zip"
@@ -44,6 +61,7 @@ jobs:
           echo "sha256=$(shasum -a 256 "$ZIP" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub Release
+        if: steps.check.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -52,7 +70,7 @@ jobs:
             --generate-notes
 
       - name: Update Homebrew tap
-        if: env.TAP_TOKEN != ''
+        if: steps.check.outputs.skip != 'true' && env.TAP_TOKEN != ''
         env:
           VERSION: ${{ steps.v.outputs.version }}
           SHA256: ${{ steps.sum.outputs.sha256 }}
