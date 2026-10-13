@@ -6,6 +6,7 @@ enum MenuBarIcon {
     private static var cache: [String: NSImage] = [:]
 
     static func image(for phase: RunPhase) -> NSImage {
+        // (`phase` is BuildRunner.aggregatePhase: busy while any project runs.)
         let badge: String
         switch phase {
         case .idle, .succeeded, .cancelled, .attached: badge = "play.fill"

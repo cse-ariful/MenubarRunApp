@@ -2,11 +2,13 @@ import AppKit
 import ServiceManagement
 import SwiftUI
 
-/// The popup is a single list:
-///   1. selected simulator
-///   2…n. one row per project, each with its own Run button (drag to reorder)
-///   then a collapsible "Archived" section (collapsed by default)
-///   last. Add Folder (plus a ⋯ menu for log, folders, settings, quit)
+/// The popup, top to bottom:
+///   1. target device of the selected project (filtered to what that project type supports)
+///   2. collapsible project picker: shows the selected project; expand to pick another
+///      (hold + drag to reorder, collapsible "Archived" section)
+///   3. actions for the selected project: run/stop, hot reload, logs, screenshot, open in IDE…
+///      (several projects can run at once)
+///   4. Add Folder (⋯ menu: folders, settings)   5. Quit
 struct MenuContentView: View {
     @EnvironmentObject private var simulators: SimulatorStore
     @EnvironmentObject private var projects: ProjectStore
@@ -19,6 +21,8 @@ struct MenuContentView: View {
     @State private var drag: RowDrag?
     @State private var rowHeights: [String: CGFloat] = [:]
     @State private var archivedHeaderFrame: CGRect = .zero
+    /// The project list is collapsed by default; it shows only the selected project.
+    @AppStorage("projectListExpanded") private var projectListExpanded = false
 
     private let rowSpacing: CGFloat = 2
     private static let listSpace = "projectList"
@@ -30,15 +34,28 @@ struct MenuContentView: View {
         VStack(alignment: .leading, spacing: 0) {
             SimulatorRow()
             RowDivider()
-            projectList
+            if projects.projects.isEmpty {
+                Text(emptyMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                projectPickerHeader
+                if projectListExpanded {
+                    projectList
+                        .padding(.leading, 12)
+                        .transition(.opacity)
+                }
+                if let project = projects.selectedProject {
+                    RowDivider()
+                    ActionsSection(project: project, showLog: $showLog)
+                }
+            }
             RowDivider()
             AddFolderRow(showLog: $showLog, launchAtLogin: $launchAtLogin)
-            if showLog {
-                LogPanel()
-                    .padding(.horizontal, 6)
-                    .padding(.top, 4)
-                    .padding(.bottom, 4)
-            }
             RowDivider()
             QuitRow()
         }
@@ -61,17 +78,55 @@ struct MenuContentView: View {
         }
     }
 
+    /// Collapsed: the selected project. Click to expand the full list.
+    private var projectPickerHeader: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) { projectListExpanded.toggle() }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: projects.selectedProject?.symbolName ?? "folder")
+                    .font(.title3)
+                    .foregroundStyle(.tint)
+                    .frame(width: 28, height: 28)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(projects.selectedProject?.name ?? "Select a project")
+                        .font(.body.weight(.semibold))
+                        .lineLimit(1)
+                    Text(pickerSubtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                if runner.runningCount > 0 {
+                    Text("\(runner.runningCount) running")
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.green.opacity(0.2)))
+                        .foregroundStyle(.green)
+                }
+                Image(systemName: "chevron.down")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(projectListExpanded ? 180 : 0))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .listRow()
+        .help(projectListExpanded ? "Collapse project list" : "Choose another project")
+    }
+
+    private var pickerSubtitle: String {
+        let count = projects.projects.count
+        let kind = projects.selectedProject?.kindLabel ?? "Project"
+        return "\(kind) · \(count) project\(count == 1 ? "" : "s") · click to \(projectListExpanded ? "collapse" : "switch")"
+    }
+
     @ViewBuilder
     private var projectList: some View {
-        if projects.projects.isEmpty {
-            Text(emptyMessage)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        } else if visibleRowCount > maxVisibleRows {
+        if visibleRowCount > maxVisibleRows {
             ScrollView { projectSections }
                 .frame(height: CGFloat(maxVisibleRows) * rowHeight)
         } else {
@@ -116,7 +171,8 @@ struct MenuContentView: View {
 
     private func draggableRow(_ project: XcodeProject) -> some View {
         let isDragged = drag?.id == project.id
-        return ProjectRow(project: project, isDragging: isDragged)
+        return ProjectRow(project: project, isDragging: isDragged,
+                          isSelected: projects.selectedProjectID == project.id)
             .background(
                 GeometryReader { geo in
                     Color.clear.preference(key: RowHeightKey.self, value: [project.id: geo.size.height])
@@ -155,6 +211,11 @@ struct MenuContentView: View {
                         }
                     }
             )
+            // Click a row to select it and collapse the list (the ⋯ menu still works).
+            .onTapGesture {
+                projects.selectedProjectID = project.id
+                withAnimation(.easeInOut(duration: 0.15)) { projectListExpanded = false }
+            }
     }
 
     private var archivedHeader: some View {
@@ -294,8 +355,29 @@ struct MenuContentView: View {
 
 // MARK: - Row 1: Simulator
 
+/// Shows (and lets you change) the run destination of the *selected* project.
+/// The menu only lists destinations that project type supports; each project remembers its own choice.
 private struct SimulatorRow: View {
     @EnvironmentObject private var simulators: SimulatorStore
+    @EnvironmentObject private var projects: ProjectStore
+
+    private var project: XcodeProject? { projects.selectedProject }
+
+    /// The selected project's destination (or the global last-used one when no project is selected).
+    private var target: Simulator? {
+        guard let project else { return simulators.selected }
+        return simulators.destination(for: project, chosen: projects.destinationID(for: project))
+    }
+
+    private var targetBinding: Binding<String?> {
+        Binding(
+            get: { target?.udid },
+            set: { udid in
+                if let project { projects.setDestination(udid, for: project) }
+                simulators.selectedUDID = udid  // also the default for projects without a choice
+            }
+        )
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -313,7 +395,7 @@ private struct SimulatorRow: View {
 
                 VStack(alignment: .leading, spacing: 1) {
                     Menu {
-                        let running = runningOthers + (simulators.selected.map { $0.isBooted && !$0.isPhysical ? [$0] : [] } ?? [])
+                        let running = runningOthers + (target.map { $0.isBooted && !$0.isPhysical ? [$0] : [] } ?? [])
                         if !running.isEmpty {
                             Section("Running") {
                                 ForEach(running) { sim in
@@ -329,8 +411,8 @@ private struct SimulatorRow: View {
                             }
                             Divider()
                         }
-                        Picker("Simulator", selection: $simulators.selectedUDID) {
-                            ForEach(simulators.groups) { group in
+                        Picker("Simulator", selection: targetBinding) {
+                            ForEach(simulators.groups(for: project)) { group in
                                 Section(group.name) {
                                     ForEach(group.simulators) { sim in
                                         Text(sim.menuTitle)
@@ -346,7 +428,7 @@ private struct SimulatorRow: View {
                             Task { await simulators.refresh() }
                         }
                     } label: {
-                        Text(simulators.selected?.name ?? "Select a simulator")
+                        Text(target?.name ?? (project == nil ? "Select a simulator" : "No compatible device"))
                             .font(.body.weight(.semibold))
                     }
                     .menuStyle(.borderlessButton)
@@ -375,29 +457,31 @@ private struct SimulatorRow: View {
     }
 
     private var subtitle: String {
-        guard let sim = simulators.selected else {
-            return simulators.isLoading ? "Loading devices…" : "Simulator or device"
+        let prefix = project.map { "\($0.name) → " } ?? ""
+        guard let sim = target else {
+            if simulators.isLoading { return "Loading devices…" }
+            return project.map { $0.unsupportedDestinationHint } ?? "Simulator or device"
         }
         if sim.isPhysical {
-            return "\(sim.runtimeName) · " + (sim.isOffline ? "Device offline" : "\(sim.transport ?? "Connected") device")
+            return prefix + "\(sim.runtimeName) · " + (sim.isOffline ? "Device offline" : "\(sim.transport ?? "Connected") device")
         }
         let others = runningOthers.count
-        return "\(sim.runtimeName) · \(sim.stateLabel)" + (others > 0 ? " · \(others) other running" : "")
+        return prefix + "\(sim.runtimeName) · \(sim.stateLabel)" + (others > 0 ? " · \(others) other running" : "")
     }
 
     /// Simulators/emulators that are running but aren't the selected one.
     private var runningOthers: [Simulator] {
-        simulators.bootedSimulators.filter { !$0.isPhysical && $0.udid != simulators.selectedUDID }
+        simulators.bootedSimulators.filter { !$0.isPhysical && $0.udid != target?.udid }
     }
 
     private var statusColor: Color {
-        guard let sim = simulators.selected else { return Color.secondary.opacity(0.6) }
+        guard let sim = target else { return Color.secondary.opacity(0.6) }
         if sim.isPhysical { return sim.isOffline ? .orange : .blue }
         return sim.isBooted ? .green : Color.secondary.opacity(0.6)
     }
 
     private var deviceSymbol: String {
-        guard let sim = simulators.selected else { return "iphone" }
+        guard let sim = target else { return "iphone" }
         switch sim.platform {
         case "Android": return "candybarphone"
         case "watchOS": return "applewatch"
@@ -409,7 +493,7 @@ private struct SimulatorRow: View {
 
     @ViewBuilder
     private var powerButton: some View {
-        if let sim = simulators.selected {
+        if let sim = target {
             if sim.isPhysical {
                 Image(systemName: sim.transport == "USB" ? "cable.connector" : "wifi")
                     .font(.system(size: 13, weight: .semibold))
@@ -435,28 +519,28 @@ private struct SimulatorRow: View {
     }
 }
 
-// MARK: - Project rows
+// MARK: - Project list rows (inside the collapsible project picker)
 
+/// A compact row in the expanded project list: click to select, hold + drag to reorder.
 private struct ProjectRow: View {
     let project: XcodeProject
     var isDragging = false
+    var isSelected = false
 
     @EnvironmentObject private var simulators: SimulatorStore
     @EnvironmentObject private var projects: ProjectStore
     @EnvironmentObject private var runner: BuildRunner
-    @AppStorage("showLog") private var showLog = false
     @State private var hovering = false
 
-    private var scheme: String? { projects.selectedScheme(for: project) }
-    private var isActive: Bool { runner.projectID == project.id && runner.phase != .idle }
-    private var isRunningThis: Bool { runner.projectID == project.id && runner.isRunning }
+    private var session: RunSession? { runner.session(for: project.id) }
+    private var destination: Simulator? {
+        simulators.destination(for: project, chosen: projects.destinationID(for: project))
+    }
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
-            // Shows a drag handle on hover: hold anywhere on the row (outside buttons), then drag to reorder.
-            Image(systemName: hovering || isDragging
-                  ? "line.3.horizontal"
-                  : project.symbolName)
+            // Shows a drag handle on hover: hold anywhere on the row, then drag to reorder.
+            Image(systemName: hovering || isDragging ? "line.3.horizontal" : project.symbolName)
                 .font(.title3)
                 .foregroundStyle(.secondary)
                 .frame(width: 28, height: 28)
@@ -470,33 +554,16 @@ private struct ProjectRow: View {
                 Text(project.name)
                     .font(.body.weight(.medium))
                     .lineLimit(1)
-
-                HStack(spacing: 4) {
-                    if project.isXcode {
-                        schemeMenu
-                    } else {
-                        Text(project.kind == .android ? "Android · \(project.androidModule ?? "app")" : "Flutter")
-                    }
-                    Text("·").foregroundStyle(.tertiary)
-                    Text(project.directory.path.abbreviatingWithTilde)
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-                if isActive {
-                    statusLine
-                        .onTapGesture { withAnimation { showLog.toggle() } }
-                        .help("Click to show or hide the build log")
-                }
+                Text(caption)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
             Spacer(minLength: 4)
 
-            // Row actions, revealed on hover (same items as the right-click menu).
             Menu {
-                actionItems
+                ProjectMenuItems(project: project)
             } label: {
                 Image(systemName: "ellipsis")
             }
@@ -506,19 +573,35 @@ private struct ProjectRow: View {
             .opacity(hovering ? 1 : 0)
             .help("Move, archive or remove")
 
-            runButton
+            RunStateBadge(phase: session?.phase ?? .idle)
+                .frame(width: 16)
         }
         .listRow()
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.accentColor.opacity(isSelected ? 0.14 : 0))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(Color.accentColor.opacity(isSelected ? 0.45 : 0), lineWidth: 1)
+        )
         .onHover { hovering = $0 }
-        .contextMenu { actionItems }
+        .help(project.directory.path.abbreviatingWithTilde)
+        .contextMenu { ProjectMenuItems(project: project) }
     }
 
-    @ViewBuilder
-    private var actionItems: some View {
-        if runBlocker == nil, let sim = simulators.selected {
-            Button("Run \(scheme ?? project.name) on \(sim.name)") { run() }
-            Divider()
-        }
+    private var caption: String {
+        let kind = project.isXcode ? (projects.selectedScheme(for: project) ?? "Xcode") : project.kindLabel
+        return "\(kind) · → \(destination?.name ?? "no device")"
+    }
+}
+
+/// Reorder / archive / remove / open items, shared by the row's ⋯ menu and right-click menu.
+private struct ProjectMenuItems: View {
+    let project: XcodeProject
+    @EnvironmentObject private var projects: ProjectStore
+
+    var body: some View {
         Button("Move to Top") { withAnimation { projects.moveToTop(project) } }
             .disabled(!projects.canMove(project, by: -1))
         Button("Move Up") { withAnimation { projects.move(project, by: -1) } }
@@ -533,18 +616,223 @@ private struct ProjectRow: View {
         }
         Button("Remove from List") { withAnimation { projects.remove(project) } }
         Divider()
-        Button("Open in Xcode") { NSWorkspace.shared.open(project.url) }
+        Button(DeviceTools.ideAction(for: project).title) { DeviceTools.openInIDE(project) }
         Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([project.url]) }
-        Button("Reload Schemes") {
-            Task { await projects.loadSchemes(for: project, force: true) }
+    }
+}
+
+/// Small run-state indicator for list rows (several projects can run at once).
+private struct RunStateBadge: View {
+    let phase: RunPhase
+
+    var body: some View {
+        switch phase {
+        case .idle:
+            Color.clear
+        case .attached:
+            Image(systemName: "bolt.fill").foregroundStyle(.yellow).help("Running · hot reload ready")
+        case .succeeded:
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).help("Launched")
+        case .failed:
+            Image(systemName: "xmark.circle.fill").foregroundStyle(.red).help("Last run failed")
+        case .cancelled:
+            Image(systemName: "stop.circle").foregroundStyle(.secondary).help("Stopped")
+        default:
+            ProgressView().controlSize(.mini).help(phase.title)
+        }
+    }
+}
+
+// MARK: - Actions for the selected project
+
+private struct ActionsSection: View {
+    let project: XcodeProject
+    @Binding var showLog: Bool
+
+    @EnvironmentObject private var simulators: SimulatorStore
+    @EnvironmentObject private var projects: ProjectStore
+    @EnvironmentObject private var runner: BuildRunner
+    @State private var screenshotMessage: String? = nil
+    @State private var lastScreenshot: URL? = nil
+    @State private var isCapturing = false
+
+    private var scheme: String? { projects.selectedScheme(for: project) }
+    private var session: RunSession? { runner.session(for: project.id) }
+    private var phase: RunPhase { session?.phase ?? .idle }
+    private var isRunningThis: Bool { session?.isRunning ?? false }
+    private var destination: Simulator? {
+        simulators.destination(for: project, chosen: projects.destinationID(for: project))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                SectionHeader(title: "Actions", systemImage: "bolt.horizontal")
+                Spacer()
+                if project.isXcode {
+                    Text("Scheme").font(.caption).foregroundStyle(.secondary)
+                    schemeMenu
+                }
+            }
+
+            if phase != .idle {
+                statusLine
+                    .onTapGesture { withAnimation { showLog.toggle() } }
+                    .help("Click to show or hide the log")
+            }
+
+            primaryButtons
+
+            if !isRunningThis, let blocker = runBlocker {
+                Text(blocker).font(.caption).foregroundStyle(.secondary)
+            }
+
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
+                ActionTile(title: showLog ? "Hide Logs" : "Show Logs", systemImage: "text.alignleft") {
+                    withAnimation { showLog.toggle() }
+                }
+                ActionTile(title: isCapturing ? "Capturing…" : "Screenshot", systemImage: "camera",
+                           disabled: isCapturing || !DeviceTools.canScreenshot(destination)) {
+                    takeScreenshot()
+                }
+                .help(DeviceTools.canScreenshot(destination)
+                      ? "Save a screenshot of \(destination?.name ?? "the device") to the Desktop and copy it"
+                      : "Boot the target device first (physical Apple devices aren't supported)")
+                ActionTile(title: DeviceTools.ideAction(for: project).title,
+                           systemImage: DeviceTools.ideAction(for: project).symbol) {
+                    DeviceTools.openInIDE(project)
+                }
+                ActionTile(title: "Reveal in Finder", systemImage: "folder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([project.url])
+                }
+                ActionTile(title: "Open in Terminal", systemImage: "terminal") {
+                    DeviceTools.openInTerminal(project)
+                }
+                if project.isXcode {
+                    ActionTile(title: "Reload Schemes", systemImage: "arrow.triangle.2.circlepath") {
+                        Task { await projects.loadSchemes(for: project, force: true) }
+                    }
+                } else {
+                    ActionTile(title: "Open Log File", systemImage: "doc.text", disabled: session == nil) {
+                        if let session { NSWorkspace.shared.open(session.logURL) }
+                    }
+                }
+            }
+
+            if let screenshotMessage {
+                Button {
+                    if let lastScreenshot { NSWorkspace.shared.activateFileViewerSelecting([lastScreenshot]) }
+                } label: {
+                    Label(screenshotMessage, systemImage: lastScreenshot == nil ? "exclamationmark.triangle" : "checkmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(lastScreenshot == nil ? Color.red : Color.green)
+                        .lineLimit(2)
+                }
+                .buttonStyle(.plain)
+                .help(lastScreenshot == nil ? "" : "Reveal in Finder")
+            }
+
+            if showLog {
+                LogPanel()
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+    }
+
+    // MARK: Run / stop / hot reload
+
+    @ViewBuilder
+    private var primaryButtons: some View {
+        HStack(spacing: 6) {
+            if isRunningThis {
+                Button(role: .destructive) {
+                    runner.stop(project.id)
+                } label: {
+                    Label("Stop", systemImage: "stop.fill").frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+                .keyboardShortcut(".", modifiers: .command)
+
+                if session?.canHotReload == true {
+                    Button {
+                        session?.hotReload()
+                    } label: {
+                        Label("Hot Reload", systemImage: "bolt.fill").frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.large)
+                    .keyboardShortcut("r", modifiers: .command)
+                    .help("Hot reload (⌘R)")
+
+                    Button {
+                        session?.hotRestart()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .controlSize(.large)
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+                    .help("Hot restart (⇧⌘R)")
+                }
+            } else {
+                Button {
+                    run()
+                } label: {
+                    Label(runTitle, systemImage: "play.fill")
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(runBlocker != nil)
+            }
         }
     }
 
-    // Scheme selector shown inline under the project name.
+    private var runTitle: String {
+        guard let destination else { return "Run" }
+        return "Run on \(destination.name)"
+    }
+
+    private var runBlocker: String? {
+        guard let destination else { return project.unsupportedDestinationHint }
+        if !project.supports(destination) { return project.unsupportedDestinationHint }
+        if destination.isOffline { return "\(destination.name) is offline" }
+        if project.isXcode, scheme == nil { return "Select a scheme first" }
+        return nil
+    }
+
+    private func run() {
+        guard runBlocker == nil, let destination else { return }
+        runner.run(project: project, scheme: project.isXcode ? scheme : nil, simulator: destination)
+    }
+
+    // MARK: Screenshot
+
+    private func takeScreenshot() {
+        guard let destination else { return }
+        isCapturing = true
+        screenshotMessage = nil
+        Task {
+            do {
+                let url = try await DeviceTools.screenshot(of: destination, label: "\(project.name) – \(destination.name)")
+                DeviceTools.copyImage(at: url)
+                lastScreenshot = url
+                screenshotMessage = "Saved \(url.lastPathComponent) to Desktop and copied it"
+            } catch {
+                lastScreenshot = nil
+                screenshotMessage = error.localizedDescription
+            }
+            isCapturing = false
+        }
+    }
+
+    // MARK: Scheme & status
+
     @ViewBuilder
     private var schemeMenu: some View {
         if projects.loadingSchemes.contains(project.id) {
-            Text("Loading schemes…")
+            ProgressView().controlSize(.mini)
         } else if let list = projects.schemes[project.id], !list.isEmpty {
             Menu {
                 Picker("Scheme", selection: Binding(
@@ -562,109 +850,41 @@ private struct ProjectRow: View {
                     Task { await projects.loadSchemes(for: project, force: true) }
                 }
             } label: {
-                Text(scheme ?? "Select scheme").font(.caption)
+                Text(scheme ?? "Select").font(.caption)
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
         } else if let error = projects.schemeErrors[project.id] {
-            Text("No schemes")
-                .foregroundStyle(.red)
-                .help(error)
+            Text("No schemes").font(.caption).foregroundStyle(.red).help(error)
         } else {
-            Text("…")
+            Text("…").font(.caption)
         }
-    }
-
-    @ViewBuilder
-    private var runButton: some View {
-        if isRunningThis {
-            if runner.canHotReload {
-                // Flutter session attached: hot reload / hot restart.
-                Button {
-                    runner.hotReload()
-                } label: {
-                    Image(systemName: "bolt.circle.fill")
-                        .font(.system(size: 22))
-                        .foregroundStyle(.yellow)
-                }
-                .buttonStyle(.plain)
-                .keyboardShortcut("r", modifiers: .command)
-                .help("Hot reload (⌘R)")
-
-                Button {
-                    runner.hotRestart()
-                } label: {
-                    Image(systemName: "arrow.clockwise.circle.fill")
-                        .font(.system(size: 22))
-                        .foregroundStyle(.orange)
-                }
-                .buttonStyle(.plain)
-                .keyboardShortcut("r", modifiers: [.command, .shift])
-                .help("Hot restart (⇧⌘R)")
-            }
-            Button {
-                runner.stop()
-            } label: {
-                Image(systemName: "stop.circle.fill")
-                    .font(.system(size: 24))
-                    .foregroundStyle(.red)
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut(".", modifiers: .command)
-            .help("Stop")
-        } else {
-            Button {
-                run()
-            } label: {
-                Image(systemName: "play.circle.fill")
-                    .font(.system(size: 24))
-                    .foregroundStyle(runBlocker == nil ? Color.accentColor : Color.secondary.opacity(0.35))
-            }
-            .buttonStyle(.plain)
-            .disabled(runBlocker != nil)
-            .help(runBlocker ?? "Run \(scheme ?? project.name) on \(simulators.selected?.name ?? "")")
-        }
-    }
-
-    private var runBlocker: String? {
-        if runner.isRunning { return "Another run is in progress" }
-        guard let destination = simulators.selected else { return "Select a simulator or device first" }
-        if !project.supports(destination) { return project.unsupportedDestinationHint }
-        if destination.isOffline { return "\(destination.name) is offline" }
-        if project.isXcode, scheme == nil { return "Select a scheme first" }
-        return nil
-    }
-
-    private func run() {
-        guard runBlocker == nil, let simulator = simulators.selected else { return }
-        runner.run(project: project, scheme: project.isXcode ? scheme : nil, simulator: simulator)
     }
 
     private var statusLine: some View {
         VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 4) {
-                PhaseIcon(phase: runner.phase)
-                Text(runner.phase.title)
-                if let started = runner.startedAt {
-                    ElapsedText(start: started, end: runner.finishedAt)
+                PhaseIcon(phase: phase)
+                Text(phase.title)
+                if let started = session?.startedAt {
+                    ElapsedText(start: started, end: session?.finishedAt)
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
-                if runner.errorCount > 0 {
-                    Text("· \(runner.errorCount) error\(runner.errorCount == 1 ? "" : "s")").foregroundStyle(.red)
+                if let errors = session?.errorCount, errors > 0 {
+                    Text("· \(errors) error\(errors == 1 ? "" : "s")").foregroundStyle(.red)
                 }
-                if runner.warningCount > 0 {
-                    Text("· \(runner.warningCount) warning\(runner.warningCount == 1 ? "" : "s")").foregroundStyle(.orange)
+                if let warnings = session?.warningCount, warnings > 0 {
+                    Text("· \(warnings) warning\(warnings == 1 ? "" : "s")").foregroundStyle(.orange)
                 }
             }
-
-            if case let .failed(message) = runner.phase {
+            if case let .failed(message) = phase {
                 Text(message)
                     .foregroundStyle(.red)
-                    .lineLimit(2)
+                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if runner.isRunning, !runner.statusDetail.isEmpty {
-                Text(runner.statusDetail)
+            } else if isRunningThis, let detail = session?.statusDetail, !detail.isEmpty {
+                Text(detail)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -672,6 +892,46 @@ private struct ProjectRow: View {
             }
         }
         .font(.caption)
+    }
+}
+
+private struct ActionTile: View {
+    let title: String
+    let systemImage: String
+    var disabled = false
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 6)
+                .padding(.horizontal, 8)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .font(.callout)
+        .foregroundStyle(disabled ? Color.secondary : Color.primary)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.primary.opacity(hovering && !disabled ? 0.12 : 0.06))
+        )
+        .onHover { hovering = $0 }
+        .disabled(disabled)
+    }
+}
+
+private struct SectionHeader: View {
+    let title: String
+    let systemImage: String
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .textCase(.uppercase)
     }
 }
 
@@ -709,7 +969,16 @@ private struct AddFolderRow: View {
                 Button(showLog ? "Hide Build Log" : "Show Build Log") {
                     withAnimation { showLog.toggle() }
                 }
-                Button("Open Log File") { NSWorkspace.shared.open(runner.logURL) }
+                Button("Open Log File") {
+                    if let id = projects.selectedProjectID, let session = runner.session(for: id) {
+                        NSWorkspace.shared.open(session.logURL)
+                    } else {
+                        NSWorkspace.shared.open(runner.logsDirectory)
+                    }
+                }
+                if runner.runningCount > 1 {
+                    Button("Stop All Runs (\(runner.runningCount))") { runner.stopAll() }
+                }
                 Button("Refresh") {
                     Task {
                         await simulators.refresh()
@@ -756,15 +1025,23 @@ private struct AddFolderRow: View {
 
 // MARK: - Log panel
 
+/// Build log of the selected project's run session.
 private struct LogPanel: View {
     @EnvironmentObject private var runner: BuildRunner
+    @EnvironmentObject private var projects: ProjectStore
+
+    private var session: RunSession? { projects.selectedProjectID.flatMap { runner.session(for: $0) } }
+    private var lines: [String] { session?.logLines ?? [] }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            Text(projects.selectedProject.map { "Log · \($0.name)" } ?? "Log · select a project")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 1) {
-                        ForEach(Array(runner.logLines.enumerated()), id: \.offset) { index, line in
+                        ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
                             Text(line.isEmpty ? " " : line)
                                 .font(.system(size: 10, design: .monospaced))
                                 .foregroundStyle(Self.color(for: line))
@@ -778,22 +1055,22 @@ private struct LogPanel: View {
                 .frame(height: 200)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25)))
-                .onChange(of: runner.logRevision) { _ in
-                    if let last = runner.logLines.indices.last {
+                .onChange(of: session?.logRevision ?? 0) { _ in
+                    if let last = lines.indices.last {
                         proxy.scrollTo(last, anchor: .bottom)
                     }
                 }
             }
 
             HStack {
-                Button("Open Full Log") { NSWorkspace.shared.open(runner.logURL) }
+                Button("Open Full Log") { NSWorkspace.shared.open(session?.logURL ?? runner.logsDirectory) }
                 Button("Copy") {
                     let pasteboard = NSPasteboard.general
                     pasteboard.clearContents()
-                    pasteboard.setString(runner.logLines.joined(separator: "\n"), forType: .string)
+                    pasteboard.setString(lines.joined(separator: "\n"), forType: .string)
                 }
                 Spacer()
-                Text("\(runner.logLines.count) lines").font(.caption2).foregroundStyle(.secondary)
+                Text("\(lines.count) lines").font(.caption2).foregroundStyle(.secondary)
             }
             .controlSize(.small)
         }
@@ -852,6 +1129,16 @@ private struct ListRowStyle: ViewModifier {
 
 private extension View {
     func listRow() -> some View { modifier(ListRowStyle()) }
+
+    /// Keyboard shortcut only for the selected row, so several rows don't fight over ⌘R / ⌘.
+    @ViewBuilder
+    func shortcut(_ key: KeyEquivalent, modifiers: EventModifiers = .command, enabled: Bool) -> some View {
+        if enabled {
+            keyboardShortcut(key, modifiers: modifiers)
+        } else {
+            self
+        }
+    }
 }
 
 // MARK: - Last row: Quit

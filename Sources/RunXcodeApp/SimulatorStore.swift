@@ -32,6 +32,29 @@ final class SimulatorStore: ObservableObject {
     var selected: Simulator? { allSimulators.first { $0.udid == selectedUDID } }
     var bootedSimulators: [Simulator] { allSimulators.filter(\.isBooted) }
 
+    /// Destination for a project: its saved choice if still available and compatible, otherwise the
+    /// last-used destination if compatible, otherwise a sensible default for the project type.
+    func destination(for project: XcodeProject, chosen: String?) -> Simulator? {
+        let all = allSimulators
+        if let chosen, let match = all.first(where: { $0.udid == chosen }), project.supports(match) { return match }
+        if let last = selected, project.supports(last) { return last }
+        let compatible = all.filter { project.supports($0) && !$0.isOffline }
+        return compatible.first(where: { $0.isBooted && !$0.isPhysical })
+            ?? compatible.first(where: { $0.kind == .simulator && $0.platform == "iOS" && $0.name.hasPrefix("iPhone") })
+            ?? compatible.first(where: { $0.kind == .androidEmulator })
+            ?? compatible.first
+    }
+
+    /// Runtime groups filtered to what the project can run on (all groups when `project` is nil).
+    func groups(for project: XcodeProject?) -> [RuntimeGroup] {
+        guard let project else { return groups }
+        return groups.compactMap { group in
+            let compatible = group.simulators.filter { project.supports($0) }
+            return compatible.isEmpty ? nil
+                : RuntimeGroup(id: group.id, platform: group.platform, version: group.version, simulators: compatible)
+        }
+    }
+
     func refresh(silent: Bool = false) async {
         if isRefreshing {
             refreshQueued = true

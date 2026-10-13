@@ -4,16 +4,23 @@ A macOS menu bar app that builds and runs your **Xcode**, **Flutter** and **Andr
 
 ## Layout
 
-The popup is a single list:
+The popup, top to bottom:
 
-1. **Selected simulator.** Click the name to switch devices. The **Boot** / **Shut Down** button acts on that simulator, using its live state. The subtitle shows how many other simulators are running, and the device menu's **Running** section lets you shut down any of them, or all at once.
-2. **One row per project.** Each row shows the scheme (click it to change), the path, and a ▶ Run button on the right. While a project is running, its row shows live status and the button turns into ■ Stop.
-3. **Add Folder…** Its ⋯ menu has the build log, tracked folders and Launch at Login.
-4. **Quit RunXcodeApp** (⌘Q) is the last row.
+1. **Target device** of the selected project. Click the name to switch devices. The menu only lists devices that project type supports (Apple targets for Xcode, Android for Android, both for Flutter), and each project remembers its own choice. **Boot** / **Shut Down** acts on that simulator using its live state. The **Running** section in the menu shuts down any running simulator, or all of them.
+2. **Project picker.** A single collapsible row showing the selected project. Click it to expand the project list, then click a project to select it; the list collapses again. Rows show a run badge (⏳ building, ⚡ hot reload ready, ✓ launched, ✗ failed), because **several projects can run at the same time**.
+3. **Actions** for the selected project:
+   - **Run on <device>** (⌘R) or **Stop** (⌘.), plus **Hot Reload** (⌘R) and hot restart (⇧⌘R) for Flutter
+   - **Show / Hide Logs**, the live build log for this project
+   - **Screenshot**, which saves the target simulator, emulator or Android device's screen to the Desktop and copies it to the clipboard (physical Apple devices aren't supported)
+   - **Open in Xcode / Android Studio / VS Code**, **Reveal in Finder**, **Open in Terminal**
+   - **Reload Schemes** (Xcode) or **Open Log File**
+   - For Xcode projects, the scheme picker sits in the Actions header.
+4. **Add Folder…** Its ⋯ menu has tracked folders, removed projects and Launch at Login.
+5. **Quit RunXcodeApp** (⌘Q).
 
 **Organizing projects:**
 
-- **Reorder:** press and hold a project row for about a third of a second. Once it lifts with a shadow (and a trackpad tap), drag it up or down while the others slide out of the way. Hovering shows a ≡ handle as a hint. Move to Top, Move Up and Move Down are also in the row's ⋯ menu and right-click menu.
+- **Reorder:** in the expanded project list, press and hold a row for about a third of a second. Once it lifts with a shadow (and a trackpad tap), drag it up or down while the others slide out of the way. Hovering shows a ≡ handle as a hint. Move to Top, Move Up and Move Down are also in the row's ⋯ menu and right-click menu.
 - **Archive:** choose Archive from the row menu, or hold a project and drag it onto the **Archived** header and release when it says *Drop to archive*. Drag an archived project above the header to unarchive it. The Archived section is collapsed by default. Click the header to expand it.
 - **Remove:** Remove from List hides a project. To bring it back, open the ⋯ menu on the Add Folder row and go to **Removed Projects**.
 - **Saved:** order, archived projects and removed projects are all remembered across restarts.
@@ -127,5 +134,6 @@ The cask's source of truth is `packaging/homebrew/runxcodeapp.rb`. Edit it there
 | `SimulatorStore.swift` | `simctl` listing, polling, boot and shutdown |
 | `ProjectStore.swift` | Tracked folders, project scanning, schemes |
 | `BuildRunner.swift` | Build and run pipelines for Xcode, Flutter and Android, plus the log |
+| `DeviceTools.swift` | Screenshots; opening a project in Xcode, Android Studio, VS Code or Terminal |
 | `AndroidSDK.swift` | adb and emulator discovery; starting and stopping emulators |
 | `Shell.swift` | Process helpers (buffered and streaming) |

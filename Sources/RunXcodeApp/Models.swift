@@ -178,6 +178,7 @@ enum Defaults {
     static let projectOrder = "projectOrder"
     static let archivedProjects = "archivedProjects"
     static let removedProjects = "removedProjects"
+    static let projectDestinations = "projectDestinations"
 }
 
 extension String {

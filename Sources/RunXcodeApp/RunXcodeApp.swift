@@ -34,6 +34,6 @@ private struct MenuBarLabel: View {
     @ObservedObject var runner: BuildRunner
 
     var body: some View {
-        Image(nsImage: MenuBarIcon.image(for: runner.phase))
+        Image(nsImage: MenuBarIcon.image(for: runner.aggregatePhase))
     }
 }

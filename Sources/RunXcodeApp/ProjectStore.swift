@@ -18,6 +18,8 @@ final class ProjectStore: ObservableObject {
     @Published private(set) var schemeErrors: [String: String] = [:]
     @Published private(set) var loadingSchemes: Set<String> = []
     @Published private var chosenSchemes: [String: String] = [:]
+    /// Run destination (simulator/device id) chosen per project.
+    @Published private var destinationIDs: [String: String] = [:]
     @Published var selectedProjectID: String? {
         didSet {
             guard selectedProjectID != oldValue else { return }
@@ -32,6 +34,7 @@ final class ProjectStore: ObservableObject {
         let defaults = UserDefaults.standard
         folders = (defaults.stringArray(forKey: Defaults.trackedFolders) ?? []).map { URL(fileURLWithPath: $0) }
         chosenSchemes = (defaults.dictionary(forKey: Defaults.selectedSchemes) as? [String: String]) ?? [:]
+        destinationIDs = (defaults.dictionary(forKey: Defaults.projectDestinations) as? [String: String]) ?? [:]
         order = defaults.stringArray(forKey: Defaults.projectOrder) ?? []
         archivedIDs = Set(defaults.stringArray(forKey: Defaults.archivedProjects) ?? [])
         removedIDs = Set(defaults.stringArray(forKey: Defaults.removedProjects) ?? [])
@@ -42,6 +45,13 @@ final class ProjectStore: ObservableObject {
     var selectedProject: XcodeProject? { projects.first { $0.id == selectedProjectID } }
 
     func selectedScheme(for project: XcodeProject) -> String? { chosenSchemes[project.id] }
+
+    func destinationID(for project: XcodeProject) -> String? { destinationIDs[project.id] }
+
+    func setDestination(_ udid: String?, for project: XcodeProject) {
+        destinationIDs[project.id] = udid
+        UserDefaults.standard.set(destinationIDs, forKey: Defaults.projectDestinations)
+    }
 
     func setScheme(_ scheme: String?, for project: XcodeProject) {
         chosenSchemes[project.id] = scheme
@@ -100,6 +110,8 @@ final class ProjectStore: ObservableObject {
         scannedProjects = found
         rebuild()
         isScanning = false
+        // Keep a project selected so the device row always reflects one.
+        if selectedProject == nil { selectedProjectID = activeProjects.first?.id ?? projects.first?.id }
 
         await loadAllSchemes()
     }

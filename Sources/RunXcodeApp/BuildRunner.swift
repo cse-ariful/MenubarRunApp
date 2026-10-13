@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 
 enum RunError: LocalizedError {
@@ -24,9 +25,65 @@ enum RunError: LocalizedError {
     }
 }
 
-/// Builds the selected scheme with xcodebuild, then installs and launches it on the chosen simulator.
+/// Owns one `RunSession` per project so several projects can build and run at the same time.
 @MainActor
 final class BuildRunner: ObservableObject {
+    @Published private(set) var sessions: [String: RunSession] = [:]
+    private var subscriptions: [String: AnyCancellable] = [:]
+
+    let logsDirectory: URL = {
+        let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Logs/RunXcodeApp", isDirectory: true)
+        try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        return logs
+    }()
+
+    func session(for projectID: String) -> RunSession? { sessions[projectID] }
+
+    func isRunning(_ projectID: String) -> Bool { sessions[projectID]?.isRunning ?? false }
+
+    var runningCount: Int { sessions.values.filter(\.isRunning).count }
+
+    func run(project: XcodeProject, scheme: String?, simulator: Simulator) {
+        let session = sessions[project.id] ?? makeSession(for: project)
+        session.run(project: project, scheme: scheme, simulator: simulator)
+    }
+
+    func stop(_ projectID: String) { sessions[projectID]?.stop() }
+
+    func stopAll() { sessions.values.forEach { $0.stop() } }
+
+    /// Phase for the menu bar icon: busy if anything runs, otherwise the most recently finished run.
+    var aggregatePhase: RunPhase {
+        if sessions.values.contains(where: \.isRunning) { return .building }
+        let latest = sessions.values
+            .filter { $0.finishedAt != nil }
+            .max { ($0.finishedAt ?? .distantPast) < ($1.finishedAt ?? .distantPast) }
+        return latest?.phase ?? .idle
+    }
+
+    private func makeSession(for project: XcodeProject) -> RunSession {
+        let session = RunSession(projectID: project.id, logURL: logsDirectory.appendingPathComponent(Self.logFileName(for: project)))
+        sessions[project.id] = session
+        // Re-render rows / menu bar icon whenever any session changes.
+        subscriptions[project.id] = session.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        return session
+    }
+
+    /// Stable per-project log name, e.g. "MyApp-1a2b3c4d.log".
+    private static func logFileName(for project: XcodeProject) -> String {
+        var hash: UInt32 = 5381
+        for byte in project.id.utf8 { hash = (hash &<< 5) &+ hash &+ UInt32(byte) }
+        let safeName = project.name.replacingOccurrences(of: "[^A-Za-z0-9._-]", with: "_", options: .regularExpression)
+        return "\(safeName)-\(String(hash, radix: 16)).log"
+    }
+}
+
+/// One project's build / install / launch (or `flutter run`) session, with its own log and status.
+@MainActor
+final class RunSession: ObservableObject {
     @Published private(set) var phase: RunPhase = .idle
     @Published private(set) var logLines: [String] = []
     @Published private(set) var logRevision = 0
@@ -36,9 +93,7 @@ final class BuildRunner: ObservableObject {
     @Published private(set) var startedAt: Date?
     @Published private(set) var finishedAt: Date?
     @Published private(set) var runDescription = ""
-    /// The project the current / most recent run belongs to.
-    @Published private(set) var projectID: String?
-
+    let projectID: String
     let logURL: URL
 
     private var firstError: String?
@@ -51,11 +106,9 @@ final class BuildRunner: ObservableObject {
     /// True while `flutter run` is attached (stdin open for r / R / q).
     private var isFlutterSession = false
 
-    init() {
-        let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Logs/RunXcodeApp", isDirectory: true)
-        try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
-        logURL = logs.appendingPathComponent("last-run.log")
+    init(projectID: String, logURL: URL) {
+        self.projectID = projectID
+        self.logURL = logURL
     }
 
     var isRunning: Bool { phase.isActive }
@@ -63,7 +116,6 @@ final class BuildRunner: ObservableObject {
     func run(project: XcodeProject, scheme: String?, simulator: Simulator, configuration: String = "Debug") {
         guard !isRunning else { return }
         beginLog()
-        projectID = project.id
         runDescription = "\(project.displayName) · \(scheme ?? project.kindLabel) → \(simulator.name) (\(simulator.runtimeName))"
         startedAt = Date()
         finishedAt = nil
