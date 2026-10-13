@@ -33,12 +33,21 @@ struct Simulator: Identifiable, Hashable {
     /// Simulators/emulators: running. Devices: reachable.
     var isBooted: Bool {
         switch kind {
-        case .simulator: return state == "Booted"
+        case .simulator: return state == "Booted" || state == "Booting"
         case .androidEmulator: return serial != nil
         case .device, .androidDevice: return !isOffline
         }
     }
     var runtimeName: String { version.isEmpty ? platform : "\(platform) \(version)" }
+    /// Human-readable power state for simulators/emulators.
+    var stateLabel: String {
+        switch state {
+        case "Booted": return "Booted"
+        case "Booting": return "Booting…"
+        case "Shutting Down": return "Shutting down…"
+        default: return isBooted ? "Running" : "Shut down"
+        }
+    }
     var menuTitle: String {
         if isPhysical {
             return isOffline ? "\(name)  (offline)" : "\(name)  (\(transport ?? "device"))"

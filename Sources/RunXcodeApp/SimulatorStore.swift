@@ -13,6 +13,8 @@ final class SimulatorStore: ObservableObject {
     }
 
     private var isRefreshing = false
+    /// A refresh was requested while one was running; run another right after so results aren't stale.
+    private var refreshQueued = false
     /// Physical devices seen this session, so a device dropping off Wi-Fi doesn't reset the selection.
     private var knownDeviceUDIDs: Set<String> = []
     private var timer: Timer?
@@ -31,14 +33,21 @@ final class SimulatorStore: ObservableObject {
     var bootedSimulators: [Simulator] { allSimulators.filter(\.isBooted) }
 
     func refresh(silent: Bool = false) async {
-        guard !isRefreshing else { return }
+        if isRefreshing {
+            refreshQueued = true
+            return
+        }
         isRefreshing = true
         if !silent { isLoading = true }
-        defer {
-            isRefreshing = false
-            isLoading = false
-        }
+        repeat {
+            refreshQueued = false
+            await performRefresh()
+        } while refreshQueued
+        isRefreshing = false
+        isLoading = false
+    }
 
+    private func performRefresh() async {
         async let simctlResult = Shell.checked(Shell.xcrunPath, ["simctl", "list", "devices", "available", "-j"])
         async let physicalDevices = Self.fetchPhysicalDevices()
         async let androidDevices = AndroidSDK.fetchDevices()
@@ -76,6 +85,49 @@ final class SimulatorStore: ObservableObject {
                 ?? everything.first
             selectedUDID = fallback?.udid
         }
+    }
+
+    /// Boots or shuts down based on the simulator's *current* state (re-read from simctl),
+    /// not the possibly stale state from the last poll.
+    func togglePower(_ simulator: Simulator) async {
+        busyUDIDs.insert(simulator.udid)
+        let current = simulator.kind == .simulator ? await Self.currentState(udid: simulator.udid) : nil
+        busyUDIDs.remove(simulator.udid)
+
+        switch current {
+        case "Booted"?, "Booting"?:
+            await shutdown(simulator)
+        case "Shutdown"?:
+            await boot(simulator)
+        case .some:
+            await refresh(silent: true)  // e.g. "Shutting Down": just update the UI
+        case nil:
+            if simulator.isBooted { await shutdown(simulator) } else { await boot(simulator) }
+        }
+    }
+
+    func shutdownAll() async {
+        let running = bootedSimulators.filter { $0.kind == .simulator || $0.kind == .androidEmulator }
+        busyUDIDs.formUnion(running.map(\.udid))
+        do {
+            if running.contains(where: { $0.kind == .simulator }) {
+                try await Shell.checked(Shell.xcrunPath, ["simctl", "shutdown", "all"])
+            }
+            for emulator in running where emulator.kind == .androidEmulator {
+                if let serial = emulator.serial { try await AndroidSDK.stopEmulator(serial: serial) }
+            }
+        } catch {
+            lastError = error.localizedDescription
+        }
+        busyUDIDs.subtract(running.map(\.udid))
+        await refresh(silent: true)
+    }
+
+    nonisolated static func currentState(udid: String) async -> String? {
+        guard let result = try? await Shell.run(Shell.xcrunPath, ["simctl", "list", "devices", "-j"]),
+              result.succeeded,
+              let groups = try? parse(result.stdout) else { return nil }
+        return groups.flatMap(\.simulators).first { $0.udid == udid }?.state
     }
 
     func boot(_ simulator: Simulator) async {

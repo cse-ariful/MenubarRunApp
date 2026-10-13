@@ -311,6 +311,22 @@ private struct SimulatorRow: View {
 
                 VStack(alignment: .leading, spacing: 1) {
                     Menu {
+                        let running = runningOthers + (simulators.selected.map { $0.isBooted && !$0.isPhysical ? [$0] : [] } ?? [])
+                        if !running.isEmpty {
+                            Section("Running") {
+                                ForEach(running) { sim in
+                                    Button("Shut Down \(sim.name)") {
+                                        Task { await simulators.shutdown(sim) }
+                                    }
+                                }
+                                if running.count > 1 {
+                                    Button("Shut Down All") {
+                                        Task { await simulators.shutdownAll() }
+                                    }
+                                }
+                            }
+                            Divider()
+                        }
                         Picker("Simulator", selection: $simulators.selectedUDID) {
                             ForEach(simulators.groups) { group in
                                 Section(group.name) {
@@ -363,7 +379,13 @@ private struct SimulatorRow: View {
         if sim.isPhysical {
             return "\(sim.runtimeName) · " + (sim.isOffline ? "Device offline" : "\(sim.transport ?? "Connected") device")
         }
-        return "\(sim.runtimeName) · \(sim.isBooted ? "Booted" : "Shut down")"
+        let others = runningOthers.count
+        return "\(sim.runtimeName) · \(sim.stateLabel)" + (others > 0 ? " · \(others) other running" : "")
+    }
+
+    /// Simulators/emulators that are running but aren't the selected one.
+    private var runningOthers: [Simulator] {
+        simulators.bootedSimulators.filter { !$0.isPhysical && $0.udid != simulators.selectedUDID }
     }
 
     private var statusColor: Color {
@@ -394,16 +416,17 @@ private struct SimulatorRow: View {
             } else if simulators.busyUDIDs.contains(sim.udid) || simulators.isLoading {
                 ProgressView().controlSize(.small)
             } else {
+                // Explicit action label so it's clear what a click will do to *this* simulator.
                 Button {
-                    Task {
-                        if sim.isBooted { await simulators.shutdown(sim) } else { await simulators.boot(sim) }
-                    }
+                    Task { await simulators.togglePower(sim) }
                 } label: {
-                    Image(systemName: "power")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(sim.isBooted ? Color.green : Color.secondary)
+                    Label(sim.isBooted ? "Shut Down" : "Boot",
+                          systemImage: sim.isBooted ? "stop.fill" : "power")
+                        .font(.caption.weight(.medium))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(sim.isBooted ? .red : .green)
                 .help(sim.isBooted ? "Shut down \(sim.name)" : "Boot \(sim.name)")
             }
         }
