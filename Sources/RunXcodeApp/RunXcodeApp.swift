@@ -30,10 +30,19 @@ struct RunXcodeAppMain: App {
     }
 }
 
+/// Menu bar icon. Spins while any project is building, installing, launching or attached (Flutter).
 private struct MenuBarLabel: View {
     @ObservedObject var runner: BuildRunner
+    @State private var frame = 0
+    private let ticker = Timer.publish(every: 0.08, on: .main, in: .common).autoconnect()
+
+    private var isBusy: Bool { runner.runningCount > 0 }
 
     var body: some View {
-        Image(nsImage: MenuBarIcon.image(for: runner.aggregatePhase))
+        Image(nsImage: isBusy ? MenuBarIcon.spinnerImage(frame: frame)
+                              : MenuBarIcon.image(for: runner.aggregatePhase))
+            .onReceive(ticker) { _ in
+                if isBusy { frame = (frame + 1) % MenuBarIcon.spinnerFrameCount }
+            }
     }
 }

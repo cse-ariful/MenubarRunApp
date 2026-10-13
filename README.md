@@ -97,7 +97,7 @@ Builds use Xcode's normal DerivedData, so they share the incremental build cache
 ## Icon
 
 - **App icon:** `Support/AppIcon.icns`, an original hammer with a green ▶ run badge. To regenerate it, run `python3 Support/icon/make_icon.py Support` (requires Pillow).
-- **Menu bar icon:** drawn in code (`MenuBarIcon.swift`), so it adapts to light and dark menu bars. The badge shows ▶ when ready, ⌛ while working and ! after a failure.
+- **Menu bar icon:** drawn in code (`MenuBarIcon.swift`), so it adapts to light and dark menu bars. The badge shows ▶ when ready, an animated spinning ring while any project is building, installing, launching or attached to Flutter, and ! after a failure.
 
 ## Publishing to Homebrew (one-time setup)
 
