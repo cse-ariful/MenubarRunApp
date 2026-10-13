@@ -5,14 +5,14 @@ import Foundation
 @MainActor
 final class ProjectStore: ObservableObject {
     @Published private(set) var folders: [URL] = []
-    /// Visible projects (not removed), in the user's order. Includes archived ones.
+    /// Visible projects (not removed), most recently used first. Includes archived ones.
     @Published private(set) var projects: [XcodeProject] = []
     @Published private(set) var archivedIDs: Set<String> = []
     @Published private(set) var removedIDs: Set<String> = []
     /// Everything the scanner found, before ordering / removal.
     @Published private var scannedProjects: [XcodeProject] = []
-    /// User-defined order of project ids (shared by the main list and Archived).
-    private var order: [String] = []
+    /// When each project was last selected or run (seconds since 1970), for "last used first" ordering.
+    private var lastUsed: [String: Double] = [:]
     @Published private(set) var isScanning = false
     @Published private(set) var schemes: [String: [String]] = [:]
     @Published private(set) var schemeErrors: [String: String] = [:]
@@ -25,6 +25,7 @@ final class ProjectStore: ObservableObject {
             guard selectedProjectID != oldValue else { return }
             UserDefaults.standard.set(selectedProjectID, forKey: Defaults.selectedProject)
             if let project = selectedProject {
+                markUsed(project)
                 Task { await loadSchemes(for: project) }
             }
         }
@@ -35,7 +36,7 @@ final class ProjectStore: ObservableObject {
         folders = (defaults.stringArray(forKey: Defaults.trackedFolders) ?? []).map { URL(fileURLWithPath: $0) }
         chosenSchemes = (defaults.dictionary(forKey: Defaults.selectedSchemes) as? [String: String]) ?? [:]
         destinationIDs = (defaults.dictionary(forKey: Defaults.projectDestinations) as? [String: String]) ?? [:]
-        order = defaults.stringArray(forKey: Defaults.projectOrder) ?? []
+        lastUsed = (defaults.dictionary(forKey: Defaults.projectLastUsed) as? [String: Double]) ?? [:]
         archivedIDs = Set(defaults.stringArray(forKey: Defaults.archivedProjects) ?? [])
         removedIDs = Set(defaults.stringArray(forKey: Defaults.removedProjects) ?? [])
         selectedProjectID = defaults.string(forKey: Defaults.selectedProject)
@@ -123,7 +124,7 @@ final class ProjectStore: ObservableObject {
         }
     }
 
-    // MARK: - Ordering, archiving, removing
+    // MARK: - Last-used ordering, archiving, removing
 
     var activeProjects: [XcodeProject] { projects.filter { !archivedIDs.contains($0.id) } }
     var archivedProjects: [XcodeProject] { projects.filter { archivedIDs.contains($0.id) } }
@@ -131,58 +132,11 @@ final class ProjectStore: ObservableObject {
 
     func isArchived(_ project: XcodeProject) -> Bool { archivedIDs.contains(project.id) }
 
-    /// Live drag-reorder: puts `id` where `targetID` is, adopting the target's section (main / Archived).
-    func move(_ id: String, to targetID: String) {
-        guard id != targetID,
-              let from = order.firstIndex(of: id),
-              let to = order.firstIndex(of: targetID) else { return }
-        order.remove(at: from)
-        order.insert(id, at: to)
-        if archivedIDs.contains(targetID) { archivedIDs.insert(id) } else { archivedIDs.remove(id) }
-        persistLayout()
+    /// Moves the project to the top of its section (called when it's selected or run).
+    func markUsed(_ project: XcodeProject) {
+        lastUsed[project.id] = Date().timeIntervalSince1970
+        UserDefaults.standard.set(lastUsed, forKey: Defaults.projectLastUsed)
         rebuild()
-    }
-
-    /// Drag-reorder within a section: places `id` at `index` among its section's visible rows.
-    func reorder(_ id: String, toSectionIndex index: Int) {
-        var section = (archivedIDs.contains(id) ? archivedProjects : activeProjects).map(\.id)
-        guard let current = section.firstIndex(of: id) else { return }
-        let target = max(0, min(index, section.count - 1))
-        guard target != current else { return }
-        section.remove(at: current)
-        section.insert(id, at: target)
-        // Reuse this section's slots in the global order so other projects keep their places.
-        let members = Set(section)
-        let slots = order.indices.filter { members.contains(order[$0]) }
-        guard slots.count == section.count else { return }
-        for (slot, projectID) in zip(slots, section) {
-            order[slot] = projectID
-        }
-        persistLayout()
-        rebuild()
-    }
-
-    /// Move up (-1) or down (+1) within the project's own section.
-    func move(_ project: XcodeProject, by offset: Int) {
-        let section = isArchived(project) ? archivedProjects : activeProjects
-        guard let index = section.firstIndex(of: project), section.indices.contains(index + offset),
-              let a = order.firstIndex(of: project.id),
-              let b = order.firstIndex(of: section[index + offset].id) else { return }
-        order.swapAt(a, b)
-        persistLayout()
-        rebuild()
-    }
-
-    func moveToTop(_ project: XcodeProject) {
-        let section = isArchived(project) ? archivedProjects : activeProjects
-        guard let first = section.first, first != project else { return }
-        move(project.id, to: first.id)
-    }
-
-    func canMove(_ project: XcodeProject, by offset: Int) -> Bool {
-        let section = isArchived(project) ? archivedProjects : activeProjects
-        guard let index = section.firstIndex(of: project) else { return false }
-        return section.indices.contains(index + offset)
     }
 
     func setArchived(_ project: XcodeProject, _ archived: Bool) {
@@ -219,23 +173,19 @@ final class ProjectStore: ObservableObject {
         Task { for project in restored { await loadSchemes(for: project) } }
     }
 
+    /// Most recently used first; never-used projects follow alphabetically (scanner order).
     private func rebuild() {
-        // New projects go to the end, alphabetically (the scanner already sorts by name).
-        let known = Set(order)
-        let newIDs = scannedProjects.map(\.id).filter { !known.contains($0) }
-        if !newIDs.isEmpty {
-            order += newIDs
-            persistLayout()
+        let visible = scannedProjects.filter { !removedIDs.contains($0.id) }
+        let alphabetical = Dictionary(visible.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
+        projects = visible.sorted { lhs, rhs in
+            let l = lastUsed[lhs.id] ?? 0, r = lastUsed[rhs.id] ?? 0
+            if l != r { return l > r }
+            return (alphabetical[lhs.id] ?? 0) < (alphabetical[rhs.id] ?? 0)
         }
-        let rank = Dictionary(order.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
-        projects = scannedProjects
-            .filter { !removedIDs.contains($0.id) }
-            .sorted { (rank[$0.id] ?? Int.max) < (rank[$1.id] ?? Int.max) }
     }
 
     private func persistLayout() {
         let defaults = UserDefaults.standard
-        defaults.set(order, forKey: Defaults.projectOrder)
         defaults.set(Array(archivedIDs), forKey: Defaults.archivedProjects)
         defaults.set(Array(removedIDs), forKey: Defaults.removedProjects)
     }

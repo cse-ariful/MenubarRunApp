@@ -5,7 +5,7 @@ import SwiftUI
 /// The popup, top to bottom:
 ///   1. target device of the selected project (filtered to what that project type supports)
 ///   2. collapsible project picker: shows the selected project; expand to pick another
-///      (hold + drag to reorder, collapsible "Archived" section)
+///      (most recently used first, collapsible "Archived" section)
 ///   3. actions for the selected project: run/stop, hot reload, logs, screenshot, open in IDE…
 ///      (several projects can run at once)
 ///   4. Add Folder (⋯ menu: folders, settings)   5. Quit
@@ -17,15 +17,10 @@ struct MenuContentView: View {
     @AppStorage("showLog") private var showLog = false
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @AppStorage("archivedExpanded") private var archivedExpanded = false
-    /// In-popup drag state (a DragGesture, not a system drag session, which is unreliable in menu bar panels).
-    @State private var drag: RowDrag?
-    @State private var rowHeights: [String: CGFloat] = [:]
-    @State private var archivedHeaderFrame: CGRect = .zero
     /// The project list is collapsed by default; it shows only the selected project.
     @AppStorage("projectListExpanded") private var projectListExpanded = false
 
     private let rowSpacing: CGFloat = 2
-    private static let listSpace = "projectList"
 
     private let maxVisibleRows = 7
     private let rowHeight: CGFloat = 54
@@ -62,7 +57,6 @@ struct MenuContentView: View {
         .padding(6)
         .frame(width: 360)
         .onAppear {
-            drag = nil
             Task { await simulators.refresh(silent: true) }
         }
         .onChange(of: launchAtLogin) { enabled in
@@ -152,70 +146,26 @@ struct MenuContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             ForEach(projects.activeProjects) { project in
-                draggableRow(project)
+                projectRow(project)
             }
 
             if !projects.archivedProjects.isEmpty {
                 archivedHeader
                 if archivedExpanded {
                     ForEach(projects.archivedProjects) { project in
-                        draggableRow(project)
+                        projectRow(project)
                     }
                 }
             }
         }
-        .coordinateSpace(name: Self.listSpace)
-        .onPreferenceChange(RowHeightKey.self) { rowHeights = $0 }
-        .onPreferenceChange(HeaderFrameKey.self) { archivedHeaderFrame = $0 }
     }
 
-    private func draggableRow(_ project: XcodeProject) -> some View {
-        let isDragged = drag?.id == project.id
-        return ProjectRow(project: project, isDragging: isDragged,
-                          isSelected: projects.selectedProjectID == project.id)
-            .background(
-                GeometryReader { geo in
-                    Color.clear.preference(key: RowHeightKey.self, value: [project.id: geo.size.height])
-                }
-            )
-            .background(
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(Color(nsColor: .windowBackgroundColor))
-                    .shadow(color: .black.opacity(0.25), radius: 6, y: 2)
-                    .opacity(isDragged ? 1 : 0)
-            )
-            .scaleEffect(isDragged ? 1.02 : 1)
-            .offset(y: isDragged ? dragOffset(for: project.id) : 0)
-            .zIndex(isDragged ? 1 : 0)
-            // The dragged row follows the pointer exactly; only its neighbours animate.
-            .transaction { if isDragged { $0.animation = nil } }
-            // Hold (press ~0.3 s) to pick the row up, then drag to reorder.
-            .gesture(
-                LongPressGesture(minimumDuration: 0.3)
-                    .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.listSpace)))
-                    .onChanged { value in
-                        switch value {
-                        case .second(true, nil):
-                            liftRow(project)
-                        case .second(true, let dragValue?):
-                            dragChanged(project, dragValue)
-                        default:
-                            break
-                        }
-                    }
-                    .onEnded { value in
-                        if case .second(true, let dragValue?) = value {
-                            dragEnded(project, dragValue)
-                        } else {
-                            withAnimation(.easeInOut(duration: 0.15)) { drag = nil }
-                        }
-                    }
-            )
-            // Click a row to select it and collapse the list (the ⋯ menu still works).
-            .onTapGesture {
-                projects.selectedProjectID = project.id
-                withAnimation(.easeInOut(duration: 0.15)) { projectListExpanded = false }
-            }
+    private func projectRow(_ project: XcodeProject) -> some View {
+        ProjectRow(project: project, isSelected: projects.selectedProjectID == project.id) {
+            // Selecting also moves it to the top (last used first) and collapses the list.
+            projects.selectedProjectID = project.id
+            withAnimation(.easeInOut(duration: 0.15)) { projectListExpanded = false }
+        }
     }
 
     private var archivedHeader: some View {
@@ -231,9 +181,6 @@ struct MenuContentView: View {
                 Text("Archived")
                 Text("\(projects.archivedProjects.count)").foregroundStyle(.tertiary)
                 Spacer()
-                if let hint = sectionChangeHint {
-                    Text(hint).foregroundStyle(Color.accentColor)
-                }
             }
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
@@ -241,108 +188,7 @@ struct MenuContentView: View {
         }
         .buttonStyle(.plain)
         .listRow()
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(Color.accentColor, lineWidth: 1.5)
-                .opacity(sectionChangeHint == nil ? 0 : 1)
-        )
-        .background(
-            GeometryReader { geo in
-                Color.clear.preference(key: HeaderFrameKey.self, value: geo.frame(in: .named(Self.listSpace)))
-            }
-        )
-        .help("Drag a project onto this header to archive it")
-    }
-
-    // MARK: - Drag to reorder
-
-    /// Rows of the section the project belongs to, in display order.
-    private func sectionIDs(for id: String) -> [String] {
-        let archived = projects.archivedIDs.contains(id)
-        return (archived ? projects.archivedProjects : projects.activeProjects).map(\.id)
-    }
-
-    private func height(_ id: String) -> CGFloat { rowHeights[id] ?? rowHeight }
-
-    /// Top of a row relative to the first row of its section.
-    private func top(of id: String, in section: [String]) -> CGFloat {
-        var y: CGFloat = 0
-        for other in section {
-            if other == id { break }
-            y += height(other) + rowSpacing
-        }
-        return y
-    }
-
-    /// Visual offset = how far the pointer moved, minus how far the row has already moved in the layout.
-    private func dragOffset(for id: String) -> CGFloat {
-        guard let drag else { return 0 }
-        let layoutShift = top(of: id, in: sectionIDs(for: id)) - drag.startTop
-        return drag.translation - layoutShift
-    }
-
-    /// Hold completed: lift the row (shadow + scale) before it moves, with a trackpad tap.
-    private func liftRow(_ project: XcodeProject) {
-        guard drag == nil else { return }
-        withAnimation(.easeOut(duration: 0.12)) {
-            drag = RowDrag(id: project.id,
-                           startTop: top(of: project.id, in: sectionIDs(for: project.id)),
-                           translation: 0,
-                           location: .zero)
-        }
-        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-    }
-
-    private func dragChanged(_ project: XcodeProject, _ value: DragGesture.Value) {
-        if drag == nil { liftRow(project) }
-        drag?.translation = value.translation.height
-        drag?.location = value.location
-        drag?.moved = true
-        guard let drag else { return }
-
-        // Where the middle of the dragged row is now, within its section.
-        let draggedMid = drag.startTop + drag.translation + height(project.id) / 2
-        let others = sectionIDs(for: project.id).filter { $0 != project.id }
-        var y: CGFloat = 0
-        var targetIndex = others.count
-        for (index, other) in others.enumerated() {
-            if draggedMid < y + height(other) / 2 {
-                targetIndex = index
-                break
-            }
-            y += height(other) + rowSpacing
-        }
-        withAnimation(.easeInOut(duration: 0.15)) {
-            projects.reorder(project.id, toSectionIndex: targetIndex)
-        }
-    }
-
-    private func dragEnded(_ project: XcodeProject, _ value: DragGesture.Value) {
-        if let change = sectionChange(for: project.id, at: value.location) {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                projects.setArchived(project, change)
-            }
-        }
-        withAnimation(.easeInOut(duration: 0.15)) { drag = nil }
-    }
-
-    /// Dragging an active project onto/below the Archived header archives it (true);
-    /// dragging an archived project above the header unarchives it (false).
-    private func sectionChange(for id: String, at location: CGPoint) -> Bool? {
-        guard archivedHeaderFrame != .zero, !projects.archivedProjects.isEmpty else { return nil }
-        let isArchived = projects.archivedIDs.contains(id)
-        if !isArchived, location.y >= archivedHeaderFrame.minY { return true }
-        if isArchived, location.y < archivedHeaderFrame.minY { return false }
-        return nil
-    }
-
-    private var sectionChangeHint: String? {
-        guard let drag, drag.moved else { return nil }
-        switch sectionChange(for: drag.id, at: drag.location) {
-        case true?: return "Drop to archive"
-        case false?: return "Drop to unarchive"
-        case nil: return nil
-        }
+        .help("Projects you archived (⋯ › Archive). Click to show or hide.")
     }
 
     private var emptyMessage: String {
@@ -521,11 +367,11 @@ private struct SimulatorRow: View {
 
 // MARK: - Project list rows (inside the collapsible project picker)
 
-/// A compact row in the expanded project list: click to select, hold + drag to reorder.
+/// A compact row in the expanded project list. The whole row is a button: click to select.
 private struct ProjectRow: View {
     let project: XcodeProject
-    var isDragging = false
     var isSelected = false
+    let onSelect: () -> Void
 
     @EnvironmentObject private var simulators: SimulatorStore
     @EnvironmentObject private var projects: ProjectStore
@@ -538,29 +384,28 @@ private struct ProjectRow: View {
     }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
-            // Shows a drag handle on hover: hold anywhere on the row, then drag to reorder.
-            Image(systemName: hovering || isDragging ? "line.3.horizontal" : project.symbolName)
-                .font(.title3)
-                .foregroundStyle(.secondary)
-                .frame(width: 28, height: 28)
-                .contentShape(Rectangle())
-                .onHover { inside in
-                    if inside { NSCursor.openHand.push() } else { NSCursor.pop() }
+        HStack(alignment: .center, spacing: 6) {
+            // Main area is a real button so clicks always register.
+            Button(action: onSelect) {
+                HStack(spacing: 10) {
+                    Image(systemName: project.symbolName)
+                        .font(.title3)
+                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                        .frame(width: 28, height: 28)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(project.name)
+                            .font(.body.weight(.medium))
+                            .lineLimit(1)
+                        Text(caption)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
                 }
-                .help("Hold, then drag to reorder")
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(project.name)
-                    .font(.body.weight(.medium))
-                    .lineLimit(1)
-                Text(caption)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                .contentShape(Rectangle())
             }
-
-            Spacer(minLength: 4)
+            .buttonStyle(.plain)
 
             Menu {
                 ProjectMenuItems(project: project)
@@ -571,7 +416,7 @@ private struct ProjectRow: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .opacity(hovering ? 1 : 0)
-            .help("Move, archive or remove")
+            .help("Archive, remove or open")
 
             RunStateBadge(phase: session?.phase ?? .idle)
                 .frame(width: 16)
@@ -596,19 +441,12 @@ private struct ProjectRow: View {
     }
 }
 
-/// Reorder / archive / remove / open items, shared by the row's ⋯ menu and right-click menu.
+/// Archive / remove / open items, shared by the row's ⋯ menu and right-click menu.
 private struct ProjectMenuItems: View {
     let project: XcodeProject
     @EnvironmentObject private var projects: ProjectStore
 
     var body: some View {
-        Button("Move to Top") { withAnimation { projects.moveToTop(project) } }
-            .disabled(!projects.canMove(project, by: -1))
-        Button("Move Up") { withAnimation { projects.move(project, by: -1) } }
-            .disabled(!projects.canMove(project, by: -1))
-        Button("Move Down") { withAnimation { projects.move(project, by: 1) } }
-            .disabled(!projects.canMove(project, by: 1))
-        Divider()
         if projects.isArchived(project) {
             Button("Unarchive") { withAnimation { projects.setArchived(project, false) } }
         } else {
@@ -804,6 +642,7 @@ private struct ActionsSection: View {
 
     private func run() {
         guard runBlocker == nil, let destination else { return }
+        projects.markUsed(project)
         runner.run(project: project, scheme: project.isXcode ? scheme : nil, simulator: destination)
     }
 
@@ -1087,29 +926,6 @@ private struct LogPanel: View {
 
 // MARK: - Shared pieces
 
-private struct RowDrag {
-    let id: String
-    let startTop: CGFloat
-    var translation: CGFloat
-    var location: CGPoint
-    var moved = false
-}
-
-private struct RowHeightKey: PreferenceKey {
-    static var defaultValue: [String: CGFloat] = [:]
-    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
-        value.merge(nextValue(), uniquingKeysWith: { $1 })
-    }
-}
-
-private struct HeaderFrameKey: PreferenceKey {
-    static var defaultValue: CGRect = .zero
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-        let next = nextValue()
-        if next != .zero { value = next }
-    }
-}
-
 private struct ListRowStyle: ViewModifier {
     @State private var hovering = false
 
@@ -1129,16 +945,6 @@ private struct ListRowStyle: ViewModifier {
 
 private extension View {
     func listRow() -> some View { modifier(ListRowStyle()) }
-
-    /// Keyboard shortcut only for the selected row, so several rows don't fight over ⌘R / ⌘.
-    @ViewBuilder
-    func shortcut(_ key: KeyEquivalent, modifiers: EventModifiers = .command, enabled: Bool) -> some View {
-        if enabled {
-            keyboardShortcut(key, modifiers: modifiers)
-        } else {
-            self
-        }
-    }
 }
 
 // MARK: - Last row: Quit

@@ -7,7 +7,7 @@ A macOS menu bar app that builds and runs your **Xcode**, **Flutter** and **Andr
 The popup, top to bottom:
 
 1. **Target device** of the selected project. Click the name to switch devices. The menu only lists devices that project type supports (Apple targets for Xcode, Android for Android, both for Flutter), and each project remembers its own choice. **Boot** / **Shut Down** acts on that simulator using its live state. The **Running** section in the menu shuts down any running simulator, or all of them.
-2. **Project picker.** A single collapsible row showing the selected project. Click it to expand the project list, then click a project to select it; the list collapses again. Rows show a run badge (⏳ building, ⚡ hot reload ready, ✓ launched, ✗ failed), because **several projects can run at the same time**.
+2. **Project picker.** A single collapsible row showing the selected project. Click it to expand the project list (most recently used first), then click a project to select it; the list collapses again. Rows show a run badge (⏳ building, ⚡ hot reload ready, ✓ launched, ✗ failed), because **several projects can run at the same time**.
 3. **Actions** for the selected project:
    - **Run on <device>** (⌘R) or **Stop** (⌘.), plus **Hot Reload** (⌘R) and hot restart (⇧⌘R) for Flutter
    - **Show / Hide Logs**, the live build log for this project
@@ -20,12 +20,12 @@ The popup, top to bottom:
 
 **Organizing projects:**
 
-- **Reorder:** in the expanded project list, press and hold a row for about a third of a second. Once it lifts with a shadow (and a trackpad tap), drag it up or down while the others slide out of the way. Hovering shows a ≡ handle as a hint. Move to Top, Move Up and Move Down are also in the row's ⋯ menu and right-click menu.
-- **Archive:** choose Archive from the row menu, or hold a project and drag it onto the **Archived** header and release when it says *Drop to archive*. Drag an archived project above the header to unarchive it. The Archived section is collapsed by default. Click the header to expand it.
+- **Last used first:** the list sorts itself, so the project you most recently selected or ran is at the top. There's no manual reordering.
+- **Archive:** choose Archive from a row's ⋯ menu or right-click menu. Archived projects move to the **Archived** section at the bottom of the list, which is collapsed by default; click its header to expand it.
 - **Remove:** Remove from List hides a project. To bring it back, open the ⋯ menu on the Add Folder row and go to **Removed Projects**.
-- **Saved:** order, archived projects and removed projects are all remembered across restarts.
+- **Saved:** last-used order, archived projects and removed projects are all remembered across restarts.
 
-The row menu also has Open in Xcode, Reveal in Finder and Reload Schemes.
+The row menu also has Open in Xcode / Android Studio / VS Code and Reveal in Finder.
 
 ## Supported projects (auto-detected)
 

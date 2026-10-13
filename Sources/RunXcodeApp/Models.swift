@@ -175,7 +175,7 @@ enum Defaults {
     static let trackedFolders = "trackedFolders"
     static let selectedProject = "selectedProjectPath"
     static let selectedSchemes = "selectedSchemes"
-    static let projectOrder = "projectOrder"
+    static let projectLastUsed = "projectLastUsed"
     static let archivedProjects = "archivedProjects"
     static let removedProjects = "removedProjects"
     static let projectDestinations = "projectDestinations"
