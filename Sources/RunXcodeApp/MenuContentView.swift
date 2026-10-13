@@ -39,6 +39,8 @@ struct MenuContentView: View {
                     .padding(.top, 4)
                     .padding(.bottom, 4)
             }
+            RowDivider()
+            QuitRow()
         }
         .padding(6)
         .frame(width: 360)
@@ -740,7 +742,6 @@ private struct AddFolderRow: View {
                 Toggle("Launch at Login", isOn: $launchAtLogin)
                 Divider()
                 Button("Quit RunXcodeApp") { NSApp.terminate(nil) }
-                    .keyboardShortcut("q")
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
@@ -851,6 +852,33 @@ private struct ListRowStyle: ViewModifier {
 
 private extension View {
     func listRow() -> some View { modifier(ListRowStyle()) }
+}
+
+// MARK: - Last row: Quit
+
+private struct QuitRow: View {
+    var body: some View {
+        Button {
+            NSApp.terminate(nil)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "power")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28)
+                Text("Quit RunXcodeApp")
+                Spacer()
+                Text("⌘Q")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut("q", modifiers: .command)
+        .listRow()
+        .help("Quit the menu bar app")
+    }
 }
 
 private struct RowDivider: View {

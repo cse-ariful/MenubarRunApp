@@ -8,7 +8,8 @@ The popup is a single list:
 
 1. **Selected simulator.** Click the name to switch devices. The **Boot** / **Shut Down** button acts on that simulator, using its live state. The subtitle shows how many other simulators are running, and the device menu's **Running** section lets you shut down any of them, or all at once.
 2. **One row per project.** Each row shows the scheme (click it to change), the path, and a ▶ Run button on the right. While a project is running, its row shows live status and the button turns into ■ Stop.
-3. **Add Folder…** is the last row. Its ⋯ menu has the build log, tracked folders, Launch at Login and Quit.
+3. **Add Folder…** Its ⋯ menu has the build log, tracked folders and Launch at Login.
+4. **Quit RunXcodeApp** (⌘Q) is the last row.
 
 **Organizing projects:**
 
