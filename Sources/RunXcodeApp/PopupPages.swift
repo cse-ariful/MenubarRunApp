@@ -58,28 +58,39 @@ struct SearchField: View {
     }
 }
 
-/// A scroll view as tall as its content, up to `maxHeight`.
-struct BoundedScrollView<Content: View>: View {
-    let maxHeight: CGFloat
-    @ViewBuilder let content: () -> Content
+// MARK: - Page transition
 
-    @State private var contentHeight: CGFloat = 0
+private struct PopupNamespaceKey: EnvironmentKey {
+    static let defaultValue: Namespace.ID? = nil
+}
 
-    var body: some View {
-        ScrollView {
-            content()
-                .background(
-                    GeometryReader { proxy in
-                        Color.clear.preference(key: ContentHeightKey.self, value: proxy.size.height)
-                    }
-                )
-        }
-        .frame(height: min(max(contentHeight, 1), maxHeight))
-        .onPreferenceChange(ContentHeightKey.self) { contentHeight = $0 }
+extension EnvironmentValues {
+    /// Shared by the main view and the pages so a tapped row glides to the top of its page.
+    var popupNamespace: Namespace.ID? {
+        get { self[PopupNamespaceKey.self] }
+        set { self[PopupNamespaceKey.self] = newValue }
     }
 }
 
-private struct ContentHeightKey: PreferenceKey {
+private struct PopupMatched: ViewModifier {
+    let id: String
+    @Environment(\.popupNamespace) private var namespace
+
+    func body(content: Content) -> some View {
+        if let namespace {
+            content.matchedGeometryEffect(id: id, in: namespace)
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    /// Marks the row that moves between the main view and its drill-in page.
+    func popupMatched(_ id: String) -> some View { modifier(PopupMatched(id: id)) }
+}
+
+struct ContentHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
@@ -159,7 +170,7 @@ struct DevicesPage: View {
             }
             .padding(.horizontal, 8)
 
-            BoundedScrollView(maxHeight: 380) {
+            ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
                     if search.isEmpty && !running.isEmpty {
                         runningSection
@@ -181,6 +192,7 @@ struct DevicesPage: View {
                 }
                 .padding(.bottom, 4)
             }
+            .frame(maxHeight: .infinity)
         }
     }
 
@@ -296,8 +308,13 @@ struct ProjectsPage: View {
             || project.directory.path.localizedCaseInsensitiveContains(query)
     }
 
-    private var active: [XcodeProject] { projects.activeProjects.filter(matches) }
-    private var archived: [XcodeProject] { projects.archivedProjects.filter(matches) }
+    /// The selected project is already the header row, so it isn't repeated in the list.
+    private func listed(_ project: XcodeProject) -> Bool {
+        project.id != projects.selectedProjectID && matches(project)
+    }
+
+    private var active: [XcodeProject] { projects.activeProjects.filter(listed) }
+    private var archived: [XcodeProject] { projects.archivedProjects.filter(listed) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -308,10 +325,10 @@ struct ProjectsPage: View {
             }
             .padding(.horizontal, 8)
 
-            BoundedScrollView(maxHeight: 400) {
+            ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
                     if active.isEmpty && archived.isEmpty {
-                        Text(search.isEmpty ? "All projects are archived." : "No projects match “\(search)”.")
+                        Text(search.isEmpty ? "No other projects." : "No other projects match “\(search)”.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 10)
@@ -336,6 +353,7 @@ struct ProjectsPage: View {
                 }
                 .padding(.bottom, 4)
             }
+            .frame(maxHeight: .infinity)
         }
     }
 

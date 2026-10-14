@@ -19,20 +19,33 @@ struct MenuContentView: View {
     /// A drill-in page (devices, projects, git) replacing the main content, or nil.
     @State private var page: PopupPage? = nil
     @StateObject private var git = GitModel()
+    /// Height of the main view; pages use it so the popup doesn't resize while switching.
+    @State private var mainHeight: CGFloat = 0
+    @Namespace private var rowNamespace
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let page {
                 pageView(page)
+                    .frame(height: max(mainHeight, 440), alignment: .top)
                     .transition(.opacity)
             } else {
                 mainContent
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(key: ContentHeightKey.self, value: proxy.size.height)
+                        }
+                    )
                     .transition(.opacity)
             }
+        }
+        .onPreferenceChange(ContentHeightKey.self) { height in
+            if page == nil, height > 0 { mainHeight = height }
         }
         .padding(6)
         .frame(width: 360)
         .environmentObject(git)
+        .environment(\.popupNamespace, rowNamespace)
         .onExitCommand { if page != nil { show(nil) } }
         .task(id: projects.selectedProject?.id) { await git.load(projects.selectedProject) }
         .onAppear {
@@ -57,7 +70,7 @@ struct MenuContentView: View {
     }
 
     private func show(_ newPage: PopupPage?) {
-        withAnimation(.easeInOut(duration: 0.15)) { page = newPage }
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) { page = newPage }
     }
 
     @ViewBuilder
@@ -75,6 +88,12 @@ struct MenuContentView: View {
     private var mainContent: some View {
         VStack(alignment: .leading, spacing: 0) {
             SimulatorRow { show(.devices) }
+            if let project = projects.selectedProject {
+                RunControls(project: project, showLog: $showLog)
+                    .padding(.horizontal, 8)
+                    .padding(.top, 4)
+                    .padding(.bottom, 2)
+            }
             RowDivider()
             if projects.projects.isEmpty {
                 Text(emptyMessage)
@@ -146,6 +165,7 @@ struct ProjectPickerRow: View {
         }
         .buttonStyle(.plain)
         .listRow()
+        .popupMatched("projects")
         .help(isOpen ? "Back" : "Choose another project")
     }
 
@@ -222,6 +242,7 @@ struct SimulatorRow: View {
             }
         }
         .listRow()
+        .popupMatched("devices")
     }
 
     private var subtitle: String {
@@ -394,21 +415,16 @@ struct RunStateBadge: View {
     }
 }
 
-// MARK: - Actions for the selected project
+// MARK: - Run controls (under the device row)
 
-private struct ActionsSection: View {
+/// Status line, Run / Stop (and hot reload for Flutter) for the selected project.
+private struct RunControls: View {
     let project: XcodeProject
     @Binding var showLog: Bool
-    let openGit: () -> Void
 
     @EnvironmentObject private var simulators: SimulatorStore
     @EnvironmentObject private var projects: ProjectStore
     @EnvironmentObject private var runner: BuildRunner
-    @State private var screenshotMessage: String? = nil
-    @State private var lastScreenshot: URL? = nil
-    @State private var isCapturing = false
-    /// One-click fix offered on the current error message (e.g. Open Privacy Settings).
-    @State private var messageAction: ScreenshotFix? = nil
 
     private var scheme: String? { projects.selectedScheme(for: project) }
     private var session: RunSession? { runner.session(for: project.id) }
@@ -419,115 +435,17 @@ private struct ActionsSection: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Git (branch + fetch / pull / push) sits above the actions.
-            GitSummary(open: openGit)
-                .padding(.horizontal, -8)
-
-            HStack(spacing: 6) {
-                SectionHeader(title: "Actions", systemImage: "bolt.horizontal")
-                Spacer()
-                if project.isXcode {
-                    Text("Scheme").font(.caption).foregroundStyle(.secondary)
-                    schemeMenu
-                }
-            }
-
-            if phase != .idle {
-                statusLine
-                    .onTapGesture { withAnimation { showLog.toggle() } }
-                    .help("Click to show or hide the log")
-            }
-
+        VStack(alignment: .leading, spacing: 6) {
             primaryButtons
 
             if !isRunningThis, let blocker = runBlocker {
                 Text(blocker).font(.caption).foregroundStyle(.secondary)
             }
 
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
-                ActionTile(title: showLog ? "Hide Logs" : "Show Logs", systemImage: "text.alignleft") {
-                    withAnimation { showLog.toggle() }
-                }
-                ActionTile(title: isCapturing ? "Capturing…" : "Screenshot",
-                           systemImage: "camera",
-                           disabled: isCapturing || !DeviceTools.canScreenshot(destination)) {
-                    takeScreenshot()
-                }
-                .help("Save a screenshot of \(destination?.name ?? "the device") to the Desktop and copy it")
-                ActionTile(title: DeviceTools.ideAction(for: project).title,
-                           systemImage: DeviceTools.ideAction(for: project).symbol) {
-                    DeviceTools.openInIDE(project)
-                }
-                ActionTile(title: "Reveal in Finder", systemImage: "folder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([project.url])
-                }
-                ActionTile(title: "Open in Terminal", systemImage: "terminal") {
-                    DeviceTools.openInTerminal(project)
-                }
-                if project.isXcode {
-                    ActionTile(title: "Reload Schemes", systemImage: "arrow.triangle.2.circlepath") {
-                        Task { await projects.loadSchemes(for: project, force: true) }
-                    }
-                } else {
-                    ActionTile(title: "Open Log File", systemImage: "doc.text", disabled: session == nil) {
-                        if let session { NSWorkspace.shared.open(session.logURL) }
-                    }
-                }
-            }
-
-            if let screenshotMessage {
-                MessageBanner(
-                    text: screenshotMessage,
-                    isError: lastScreenshot == nil,
-                    onTap: revealScreenshot,
-                    actionTitle: messageAction?.actionTitle,
-                    action: messageFix,
-                    onDismiss: {
-                        withAnimation {
-                            self.screenshotMessage = nil
-                            self.messageAction = nil
-                        }
-                    }
-                )
-            }
-
-            if showLog {
-                LogPanel()
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        // Messages and prompts don't outlive the popup.
-        .onDisappear { clearTransientMessages() }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
-            clearTransientMessages()
-        }
-    }
-
-    private var messageFix: (() -> Void)? {
-        guard let fix = messageAction else { return nil }
-        return { confirm(fix) }
-    }
-
-    private var revealScreenshot: (() -> Void)? {
-        guard let url = lastScreenshot else { return nil }
-        return { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-    }
-
-    private func clearTransientMessages() {
-        screenshotMessage = nil
-        lastScreenshot = nil
-        messageAction = nil
-    }
-
-    private func confirm(_ fix: ScreenshotFix) {
-        messageAction = nil
-        screenshotMessage = nil
-        switch fix {
-        case .openDesktopPrivacy:
-            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders") {
-                NSWorkspace.shared.open(url)
+            if phase != .idle {
+                statusLine
+                    .onTapGesture { withAnimation { showLog.toggle() } }
+                    .help("Click to show or hide the log")
             }
         }
     }
@@ -613,6 +531,170 @@ private struct ActionsSection: View {
         runner.run(project: project, scheme: project.isXcode ? scheme : nil, simulator: destination)
     }
 
+    private var statusLine: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 4) {
+                PhaseIcon(phase: phase)
+                Text(phase.title)
+                if let started = session?.startedAt {
+                    ElapsedText(start: started, end: session?.finishedAt)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                if let errors = session?.errorCount, errors > 0 {
+                    Text("· \(errors) error\(errors == 1 ? "" : "s")").foregroundStyle(.red)
+                }
+                if let warnings = session?.warningCount, warnings > 0 {
+                    Text("· \(warnings) warning\(warnings == 1 ? "" : "s")").foregroundStyle(.orange)
+                }
+            }
+            if case let .failed(message) = phase {
+                Text(message)
+                    .foregroundStyle(.red)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if isRunningThis, let detail = session?.statusDetail, !detail.isEmpty {
+                Text(detail)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .font(.caption)
+    }
+}
+
+// MARK: - Actions for the selected project
+
+private struct ActionsSection: View {
+    let project: XcodeProject
+    @Binding var showLog: Bool
+    let openGit: () -> Void
+
+    @EnvironmentObject private var simulators: SimulatorStore
+    @EnvironmentObject private var projects: ProjectStore
+    @EnvironmentObject private var runner: BuildRunner
+    @State private var screenshotMessage: String? = nil
+    @State private var lastScreenshot: URL? = nil
+    @State private var isCapturing = false
+    /// One-click fix offered on the current error message (e.g. Open Privacy Settings).
+    @State private var messageAction: ScreenshotFix? = nil
+
+    private var scheme: String? { projects.selectedScheme(for: project) }
+    private var session: RunSession? { runner.session(for: project.id) }
+    private var phase: RunPhase { session?.phase ?? .idle }
+    private var isRunningThis: Bool { session?.isRunning ?? false }
+    private var destination: Simulator? {
+        simulators.destination(for: project, chosen: projects.destinationID(for: project))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Git (branch + fetch / pull / push) sits above the actions.
+            GitSummary(open: openGit)
+                .padding(.horizontal, -8)
+
+            HStack(spacing: 6) {
+                SectionHeader(title: "Actions", systemImage: "bolt.horizontal")
+                Spacer()
+                if project.isXcode {
+                    Text("Scheme").font(.caption).foregroundStyle(.secondary)
+                    schemeMenu
+                }
+            }
+
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
+                ActionTile(title: showLog ? "Hide Logs" : "Show Logs", systemImage: "text.alignleft") {
+                    withAnimation { showLog.toggle() }
+                }
+                ActionTile(title: isCapturing ? "Capturing…" : "Screenshot",
+                           systemImage: "camera",
+                           disabled: isCapturing || !DeviceTools.canScreenshot(destination)) {
+                    takeScreenshot()
+                }
+                .help("Save a screenshot of \(destination?.name ?? "the device") to the Desktop and copy it")
+                ActionTile(title: DeviceTools.ideAction(for: project).title,
+                           systemImage: DeviceTools.ideAction(for: project).symbol) {
+                    DeviceTools.openInIDE(project)
+                }
+                ActionTile(title: "Browse Files", systemImage: "doc.text.magnifyingglass") {
+                    FileBrowserWindow.show(project: project)
+                }
+                .help("Browse the project's files with syntax highlighting")
+                ActionTile(title: "Reveal in Finder", systemImage: "folder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([project.url])
+                }
+                ActionTile(title: "Open in Terminal", systemImage: "terminal") {
+                    DeviceTools.openInTerminal(project)
+                }
+                if project.isXcode {
+                    ActionTile(title: "Reload Schemes", systemImage: "arrow.triangle.2.circlepath") {
+                        Task { await projects.loadSchemes(for: project, force: true) }
+                    }
+                } else {
+                    ActionTile(title: "Open Log File", systemImage: "doc.text", disabled: session == nil) {
+                        if let session { NSWorkspace.shared.open(session.logURL) }
+                    }
+                }
+            }
+
+            if let screenshotMessage {
+                MessageBanner(
+                    text: screenshotMessage,
+                    isError: lastScreenshot == nil,
+                    onTap: revealScreenshot,
+                    actionTitle: messageAction?.actionTitle,
+                    action: messageFix,
+                    onDismiss: {
+                        withAnimation {
+                            self.screenshotMessage = nil
+                            self.messageAction = nil
+                        }
+                    }
+                )
+            }
+
+            if showLog {
+                LogPanel()
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        // Messages and prompts don't outlive the popup.
+        .onDisappear { clearTransientMessages() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            clearTransientMessages()
+        }
+    }
+
+    private var messageFix: (() -> Void)? {
+        guard let fix = messageAction else { return nil }
+        return { confirm(fix) }
+    }
+
+    private var revealScreenshot: (() -> Void)? {
+        guard let url = lastScreenshot else { return nil }
+        return { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+    }
+
+    private func clearTransientMessages() {
+        screenshotMessage = nil
+        lastScreenshot = nil
+        messageAction = nil
+    }
+
+    private func confirm(_ fix: ScreenshotFix) {
+        messageAction = nil
+        screenshotMessage = nil
+        switch fix {
+        case .openDesktopPrivacy:
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders") {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
     // MARK: Screenshot
 
     private func takeScreenshot() {
@@ -674,38 +756,6 @@ private struct ActionsSection: View {
         }
     }
 
-    private var statusLine: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 4) {
-                PhaseIcon(phase: phase)
-                Text(phase.title)
-                if let started = session?.startedAt {
-                    ElapsedText(start: started, end: session?.finishedAt)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-                if let errors = session?.errorCount, errors > 0 {
-                    Text("· \(errors) error\(errors == 1 ? "" : "s")").foregroundStyle(.red)
-                }
-                if let warnings = session?.warningCount, warnings > 0 {
-                    Text("· \(warnings) warning\(warnings == 1 ? "" : "s")").foregroundStyle(.orange)
-                }
-            }
-            if case let .failed(message) = phase {
-                Text(message)
-                    .foregroundStyle(.red)
-                    .lineLimit(3)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if isRunningThis, let detail = session?.statusDetail, !detail.isEmpty {
-                Text(detail)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-        }
-        .font(.caption)
-    }
 }
 
 /// One-click fixes offered on a screenshot error message.

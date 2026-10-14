@@ -235,6 +235,7 @@ struct GitBranchRow: View {
                 placeholder
             }
         }
+        .popupMatched("git")
     }
 
     /// Same height as the branch row, so nothing jumps when the status arrives.
@@ -323,9 +324,10 @@ struct GitPage: View {
                 SearchField(text: $search, prompt: "Search branches")
                     .padding(.horizontal, 8)
 
-                BoundedScrollView(maxHeight: 340) {
+                ScrollView {
                     branchList(status)
                 }
+                .frame(maxHeight: .infinity)
             }
         }
     }

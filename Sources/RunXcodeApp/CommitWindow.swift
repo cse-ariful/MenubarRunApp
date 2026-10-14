@@ -42,6 +42,7 @@ enum CommitWindow {
                 NotificationCenter.default.removeObserver(token)
             }
         }
+        DockPresence.track(window)
         controller.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
     }
