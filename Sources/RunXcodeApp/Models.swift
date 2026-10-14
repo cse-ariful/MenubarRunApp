@@ -132,18 +132,23 @@ enum RunPhase: Equatable {
     case launching
     /// Flutter: `flutter run` is attached to the app (hot reload available).
     case attached
+    /// Launched and attached to the app's console: its output streams into the log until it exits or Stop.
+    case streaming
     case succeeded
     case failed(String)
     case cancelled
 
     var isActive: Bool {
         switch self {
-        case .building, .preparing, .booting, .installing, .launching, .attached:
+        case .building, .preparing, .booting, .installing, .launching, .attached, .streaming:
             return true
         default:
             return false
         }
     }
+
+    /// Active and not yet launched (drives the menu bar spinner).
+    var isBuilding: Bool { isActive && self != .streaming }
 
     var title: String {
         switch self {
@@ -154,6 +159,7 @@ enum RunPhase: Equatable {
         case .installing: return "Installing…"
         case .launching: return "Launching…"
         case .attached: return "Running · hot reload ready"
+        case .streaming: return "Running · live logs"
         case .succeeded: return "Running"
         case .failed: return "Failed"
         case .cancelled: return "Stopped"
@@ -163,7 +169,7 @@ enum RunPhase: Equatable {
     var menuBarSymbol: String {
         switch self {
         case .idle, .cancelled: return "play.square"
-        case .succeeded: return "play.square.fill"
+        case .succeeded, .streaming: return "play.square.fill"
         case .failed: return "exclamationmark.triangle"
         default: return "hourglass"
         }

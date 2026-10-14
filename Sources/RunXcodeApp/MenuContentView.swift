@@ -469,6 +469,8 @@ private struct RunStateBadge: View {
             Color.clear
         case .attached:
             Image(systemName: "bolt.fill").foregroundStyle(.yellow).help("Running · hot reload ready")
+        case .streaming:
+            Image(systemName: "dot.radiowaves.left.and.right").foregroundStyle(.green).help("Running · live logs")
         case .succeeded:
             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).help("Launched")
         case .failed:
@@ -632,6 +634,19 @@ private struct ActionsSection: View {
                 }
                 .controlSize(.large)
                 .keyboardShortcut(".", modifiers: .command)
+
+                if session?.phase == .streaming {
+                    // Rebuild and relaunch; the current app and its log stream are stopped first.
+                    Button {
+                        run()
+                    } label: {
+                        Label("Run Again", systemImage: "play.fill").frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.large)
+                    .keyboardShortcut("r", modifiers: .command)
+                    .disabled(runBlocker != nil)
+                    .help("Stop, rebuild and relaunch (⌘R)")
+                }
 
                 if session?.canHotReload == true {
                     Button {
@@ -1549,6 +1564,8 @@ private struct PhaseIcon: View {
             Image(systemName: "stop.circle.fill").foregroundStyle(.orange)
         case .attached:
             Image(systemName: "bolt.fill").foregroundStyle(.yellow)
+        case .streaming:
+            Image(systemName: "dot.radiowaves.left.and.right").foregroundStyle(.green)
         default:
             ProgressView().controlSize(.mini)
         }

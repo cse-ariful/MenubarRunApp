@@ -10,7 +10,11 @@ The popup, top to bottom:
 2. **Project picker.** A single collapsible row showing the selected project. Click it to expand the project list (most recently used first), then click a project to select it; the list collapses again. Rows show a run badge (⏳ building, ⚡ hot reload ready, ✓ launched, ✗ failed), because **several projects can run at the same time**.
 3. **Actions** for the selected project:
    - **Run on <device>** (⌘R) or **Stop** (⌘.), plus **Hot Reload** (⌘R) and hot restart (⇧⌘R) for Flutter
-   - **Show / Hide Logs**, the live build log for this project
+   - **Show / Hide Logs**, the live build log for this project. After launch, the log keeps going with the **app's own output** (the row shows a green ⦿ and "Running · live logs"):
+     - **Simulator:** `xcrun simctl launch --console-pty`. You see `print`, `NSLog`, and `os_log` / `Logger` messages, like Xcode's console. **Stop** quits the app.
+     - **iPhone / iPad:** `xcrun devicectl device process launch --console`. **Stop** detaches; the app keeps running on the device.
+     - **Android:** `adb logcat --pid=<app pid>`. **Stop** force-stops the app.
+     - **Run Again** (⌘R) rebuilds and relaunches. If your Xcode's tools don't support attaching to the console, the app is launched as before, without live logs. The menu bar spinner only spins while building, not while logs stream.
    - **Screenshot**, which saves the target device's screen to the **Desktop** and copies it to the clipboard. It uses Xcode's own tools: `xcrun simctl io <udid> screenshot <file>` for simulators, and `xcrun devicectl device screenshot --device <udid> <file>` for **physical iPhones and iPads** (USB or Wi-Fi). Android emulators and phones use `adb`. Nothing extra to install. The first time, allow RunXcodeApp to access the Desktop folder if macOS asks. If saving is blocked, the error offers **Open Privacy Settings**. Messages have an ✕ and clear when the popup closes.
    - **Open in Xcode / Android Studio / VS Code**, **Reveal in Finder**, **Open in Terminal**
    - **Reload Schemes** (Xcode) or **Open Log File**

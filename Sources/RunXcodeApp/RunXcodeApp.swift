@@ -36,7 +36,7 @@ private struct MenuBarLabel: View {
     @State private var frame = 0
     private let ticker = Timer.publish(every: 0.08, on: .main, in: .common).autoconnect()
 
-    private var isBusy: Bool { runner.runningCount > 0 }
+    private var isBusy: Bool { runner.buildingCount > 0 }
 
     var body: some View {
         Image(nsImage: isBusy ? MenuBarIcon.spinnerImage(frame: frame)

@@ -44,6 +44,9 @@ final class BuildRunner: ObservableObject {
 
     var runningCount: Int { sessions.values.filter(\.isRunning).count }
 
+    /// Sessions still building / installing / launching (not just streaming an app's logs).
+    var buildingCount: Int { sessions.values.filter { $0.phase.isBuilding }.count }
+
     func run(project: XcodeProject, scheme: String?, simulator: Simulator) {
         let session = sessions[project.id] ?? makeSession(for: project)
         session.run(project: project, scheme: scheme, simulator: simulator)
@@ -55,7 +58,8 @@ final class BuildRunner: ObservableObject {
 
     /// Phase for the menu bar icon: busy if anything runs, otherwise the most recently finished run.
     var aggregatePhase: RunPhase {
-        if sessions.values.contains(where: \.isRunning) { return .building }
+        if sessions.values.contains(where: { $0.phase.isBuilding }) { return .building }
+        if sessions.values.contains(where: { $0.phase == .streaming }) { return .streaming }
         let latest = sessions.values
             .filter { $0.finishedAt != nil }
             .max { ($0.finishedAt ?? .distantPast) < ($1.finishedAt ?? .distantPast) }
@@ -114,6 +118,16 @@ final class RunSession: ObservableObject {
     var isRunning: Bool { phase.isActive }
 
     func run(project: XcodeProject, scheme: String?, simulator: Simulator, configuration: String = "Debug") {
+        if phase == .streaming {
+            // Run again while the app is live: stop it (and its log stream), then start over.
+            let previous = runTask
+            stop()
+            Task { [weak self] in
+                await previous?.value
+                self?.run(project: project, scheme: scheme, simulator: simulator, configuration: configuration)
+            }
+            return
+        }
         guard !isRunning else { return }
         beginLog()
         runDescription = "\(project.displayName) · \(scheme ?? project.kindLabel) → \(simulator.name) (\(simulator.runtimeName))"
@@ -238,8 +252,16 @@ final class RunSession: ObservableObject {
             try Task.checkCancellation()
 
             phase = .launching
-            try await logged(["devicectl", "device", "process", "launch", "--device", udid,
-                              "--terminate-existing", product.bundleIdentifier])
+            try await launchWithConsole(
+                ["devicectl", "device", "process", "launch", "--console", "--terminate-existing",
+                 "--device", udid, product.bundleIdentifier],
+                fallback: ["devicectl", "device", "process", "launch", "--device", udid,
+                           "--terminate-existing", product.bundleIdentifier],
+                environment: [:],
+                appName: product.appURL.deletingPathExtension().lastPathComponent,
+                destination: simulator.name,
+                stopNote: "Stop detaches from the app; it keeps running on the device."
+            )
         } else {
             phase = .booting
             if let bootTask {
@@ -257,10 +279,50 @@ final class RunSession: ObservableObject {
             try Task.checkCancellation()
 
             phase = .launching
-            try await logged(["simctl", "launch", "--terminate-running-process", udid, product.bundleIdentifier])
+            // --console-pty streams the app's stdout/stderr (print, NSLog) and passes Stop (SIGINT) to the app.
+            // OS_ACTIVITY_DT_MODE (set for the app via SIMCTL_CHILD_) also mirrors os_log / Logger output,
+            // like Xcode's console.
+            try await launchWithConsole(
+                ["simctl", "launch", "--console-pty", "--terminate-running-process", udid, product.bundleIdentifier],
+                fallback: ["simctl", "launch", "--terminate-running-process", udid, product.bundleIdentifier],
+                environment: ["SIMCTL_CHILD_OS_ACTIVITY_DT_MODE": "enable"],
+                appName: product.appURL.deletingPathExtension().lastPathComponent,
+                destination: simulator.name,
+                stopNote: "Stop quits the app."
+            )
         }
-        append("✓ Launched \(product.bundleIdentifier) on \(simulator.name)")
-        phase = .succeeded
+    }
+
+    /// Launches with the app's console attached and streams its output until the app exits or Stop.
+    /// If this Xcode's tool doesn't know the console option, launches without it (no live logs).
+    private func launchWithConsole(_ arguments: [String], fallback: [String], environment: [String: String],
+                                   appName: String, destination: String, stopNote: String) async throws {
+        phase = .streaming
+        statusDetail = "Live logs · \(stopNote)"
+        append("✓ Launching \(appName) on \(destination); its output follows. \(stopNote)")
+        let mark = logLines.count
+        let status = await stream(Shell.xcrunPath, arguments, in: FileManager.default.temporaryDirectory,
+                                  environment: environment, display: "xcrun")
+        if Task.isCancelled { throw CancellationError() }
+
+        let output = logLines.suffix(max(0, logLines.count - mark)).joined(separator: "\n").lowercased()
+        let unsupported = ["unknown option", "unrecognized option", "unexpected argument", "unknown argument"]
+        if status != 0, unsupported.contains(where: output.contains) {
+            append("This Xcode can't attach to the app's console, so live logs aren't available. Launching without them.")
+            phase = .launching
+            try await logged(fallback)
+            append("✓ Launched \(appName) on \(destination)")
+            phase = .succeeded
+            return
+        }
+        if status == 0 {
+            append("■ \(appName) exited")
+            phase = .cancelled
+        } else {
+            append("■ \(appName) exited (status \(status))")
+            phase = .failed("\(appName) exited with status \(status)")
+        }
+        statusDetail = ""
     }
 
     // MARK: Flutter
@@ -330,7 +392,33 @@ final class RunSession: ObservableObject {
         try await logged(["-s", serial, "shell", "monkey", "-p", applicationID,
                           "-c", "android.intent.category.LAUNCHER", "1"], executable: adb, display: "adb")
         append("✓ Launched \(applicationID) on \(destination.name)")
-        phase = .succeeded
+
+        // Live logs: logcat filtered to the app's process.
+        var pid: String?
+        for _ in 0..<10 where pid == nil {
+            try await Task.sleep(nanoseconds: 300_000_000)
+            let result = try? await Shell.run(adb, ["-s", serial, "shell", "pidof", "-s", applicationID])
+            let value = result?.stdout.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !value.isEmpty, Int(value) != nil { pid = value }
+        }
+        guard let pid else {
+            append("Couldn't find the app's process, so live logs aren't shown.")
+            phase = .succeeded
+            return
+        }
+
+        phase = .streaming
+        statusDetail = "Live logs · Stop quits the app."
+        append("Live logs (logcat, pid \(pid)). Stop quits the app.")
+        _ = await stream(adb, ["-s", serial, "logcat", "-v", "time", "--pid=\(pid)"],
+                         in: project.url, display: "adb")
+        if Task.isCancelled {
+            _ = try? await Shell.run(adb, ["-s", serial, "shell", "am", "force-stop", applicationID])
+            throw CancellationError()
+        }
+        append("■ Log stream ended")
+        statusDetail = ""
+        phase = .cancelled
     }
 
     /// Reads the applicationId from the build output (AGP 4.1+), falling back to the module's build script.
