@@ -493,11 +493,8 @@ private struct ActionsSection: View {
     @State private var screenshotMessage: String? = nil
     @State private var lastScreenshot: URL? = nil
     @State private var isCapturing = false
-    /// Asks before installing the iPhone screenshot helper or starting its tunnel.
-    @State private var screenshotPrompt: ScreenshotPrompt? = nil
-    @State private var isInstallingHelper = false
-    /// One-click fix offered on the current error message (Install / Open Terminal / Open Settings…).
-    @State private var messageAction: ScreenshotPrompt? = nil
+    /// One-click fix offered on the current error message (e.g. Open Privacy Settings).
+    @State private var messageAction: ScreenshotFix? = nil
 
     private var scheme: String? { projects.selectedScheme(for: project) }
     private var session: RunSession? { runner.session(for: project.id) }
@@ -534,9 +531,9 @@ private struct ActionsSection: View {
                 ActionTile(title: showLog ? "Hide Logs" : "Show Logs", systemImage: "text.alignleft") {
                     withAnimation { showLog.toggle() }
                 }
-                ActionTile(title: isInstallingHelper ? "Installing…" : (isCapturing ? "Capturing…" : "Screenshot"),
+                ActionTile(title: isCapturing ? "Capturing…" : "Screenshot",
                            systemImage: "camera",
-                           disabled: isCapturing || isInstallingHelper || !DeviceTools.canScreenshot(destination)) {
+                           disabled: isCapturing || !DeviceTools.canScreenshot(destination)) {
                     takeScreenshot()
                 }
                 .help("Save a screenshot of \(destination?.name ?? "the device") to the Desktop and copy it")
@@ -558,19 +555,6 @@ private struct ActionsSection: View {
                     ActionTile(title: "Open Log File", systemImage: "doc.text", disabled: session == nil) {
                         if let session { NSWorkspace.shared.open(session.logURL) }
                     }
-                }
-            }
-
-            if let screenshotPrompt {
-                promptCard(screenshotPrompt)
-            }
-
-            if isInstallingHelper {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("Installing pymobiledevice3 with Homebrew… (about a minute)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -616,83 +600,16 @@ private struct ActionsSection: View {
     private func clearTransientMessages() {
         screenshotMessage = nil
         lastScreenshot = nil
-        screenshotPrompt = nil
         messageAction = nil
     }
 
-    // MARK: Install / tunnel prompt
-
-    @ViewBuilder
-    private func promptCard(_ prompt: ScreenshotPrompt) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 6) {
-                Image(systemName: prompt == .startTunnel ? "lock.shield" : "shippingbox")
-                    .foregroundStyle(.tint)
-                Text(prompt.message)
-                    .font(.caption)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
-                Button {
-                    withAnimation { screenshotPrompt = nil }
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Dismiss")
-            }
-            HStack {
-                Spacer()
-                Button("Not Now") { withAnimation { screenshotPrompt = nil } }
-                    .controlSize(.small)
-                Button(prompt.actionTitle) { confirm(prompt) }
-                    .controlSize(.small)
-                    .buttonStyle(.borderedProminent)
-            }
-        }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.08)))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.accentColor.opacity(0.3)))
-    }
-
-    private func confirm(_ prompt: ScreenshotPrompt) {
-        screenshotPrompt = nil
+    private func confirm(_ fix: ScreenshotFix) {
         messageAction = nil
-        switch prompt {
+        screenshotMessage = nil
+        switch fix {
         case .openDesktopPrivacy:
-            screenshotMessage = nil
             if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders") {
                 NSWorkspace.shared.open(url)
-            }
-        case .getHomebrew:
-            screenshotMessage = nil
-            if let url = URL(string: "https://brew.sh") { NSWorkspace.shared.open(url) }
-        case .installHelper:
-            isInstallingHelper = true
-            screenshotMessage = nil
-            Task {
-                do {
-                    try await DeviceTools.installAppleDeviceHelper()
-                    isInstallingHelper = false
-                    takeScreenshot()  // continue: tunnel check, then capture
-                } catch {
-                    isInstallingHelper = false
-                    lastScreenshot = nil
-                    screenshotMessage = "Install failed: \(error.localizedDescription)"
-                    // Offer the next step: get Homebrew if it's missing, otherwise retry the install.
-                    messageAction = DeviceTools.brewPath == nil ? .getHomebrew : .installHelper
-                }
-            }
-        case .startTunnel:
-            do {
-                try DeviceTools.startTunnelInTerminal()
-                messageAction = nil
-                lastScreenshot = nil
-                screenshotMessage = "Enter your Mac password in the Terminal window and keep it open, then click Screenshot again."
-            } catch {
-                lastScreenshot = nil
-                screenshotMessage = error.localizedDescription
             }
         }
     }
@@ -770,23 +687,9 @@ private struct ActionsSection: View {
     private func takeScreenshot() {
         guard let destination else { return }
         screenshotMessage = nil
-        screenshotPrompt = nil
         messageAction = nil
-
-        // Physical iPhone: offer to install the helper tool if it's missing.
-        if destination.kind == .device, !DeviceTools.hasAppleDeviceHelper {
-            withAnimation { screenshotPrompt = .installHelper }
-            return
-        }
-
         isCapturing = true
         Task {
-            // iOS 17+: offer to start the tunnel if it isn't running.
-            if DeviceTools.needsTunnel(destination), !(await DeviceTools.isTunnelRunning()) {
-                isCapturing = false
-                withAnimation { screenshotPrompt = .startTunnel }
-                return
-            }
             do {
                 let url = try await DeviceTools.screenshot(of: destination, label: "\(project.name) – \(destination.name)")
                 DeviceTools.copyImage(at: url)
@@ -796,8 +699,6 @@ private struct ActionsSection: View {
                 lastScreenshot = nil
                 screenshotMessage = error.localizedDescription
                 switch error {
-                case .helperMissing: messageAction = .installHelper
-                case .tunnelNotRunning: messageAction = .startTunnel
                 case .desktopPermission: messageAction = .openDesktopPrivacy
                 }
             } catch {
@@ -876,36 +777,13 @@ private struct ActionsSection: View {
     }
 }
 
-/// Questions asked before doing something on the user's Mac for iPhone screenshots.
-private enum ScreenshotPrompt {
-    case installHelper
-    case startTunnel
+/// One-click fixes offered on a screenshot error message.
+private enum ScreenshotFix {
     case openDesktopPrivacy
-    case getHomebrew
-
-    var message: String {
-        switch self {
-        case .installHelper:
-            return "Screenshots of a physical iPhone need pymobiledevice3, a free open-source tool "
-                + "(Apple doesn't ship one). Install it now with Homebrew? This runs "
-                + "`brew install pipx` and `pipx install pymobiledevice3`."
-        case .startTunnel:
-            return "iOS 17 and later need a device tunnel running for screenshots, including over Wi-Fi. "
-                + "It needs your admin password, so it opens in Terminal "
-                + "(`sudo pymobiledevice3 remote tunneld`). Keep that window open while you take screenshots."
-        case .openDesktopPrivacy:
-            return "Allow RunXcodeApp to access the Desktop folder in System Settings › Privacy & Security › Files and Folders."
-        case .getHomebrew:
-            return "Installing pymobiledevice3 needs Homebrew. Install it from brew.sh, then try again."
-        }
-    }
 
     var actionTitle: String {
         switch self {
-        case .installHelper: return "Install"
-        case .startTunnel: return "Open Terminal"
         case .openDesktopPrivacy: return "Open Privacy Settings"
-        case .getHomebrew: return "Get Homebrew"
         }
     }
 }

@@ -3,20 +3,11 @@ import Foundation
 
 /// Screenshot failures the UI can offer a one-click fix for.
 enum ScreenshotError: LocalizedError {
-    /// No tool that can capture a physical iPhone is installed (fix: install pymobiledevice3).
-    case helperMissing
-    /// pymobiledevice3 couldn't reach the device; on iOS 17+ the tunnel daemon must run (fix: open Terminal).
-    case tunnelNotRunning(details: String)
     /// macOS blocked writing to the Desktop (fix: allow it in Privacy & Security).
     case desktopPermission
 
     var errorDescription: String? {
         switch self {
-        case .helperMissing:
-            return "Screenshots of a physical iPhone need pymobiledevice3, a free tool (Apple doesn't ship one)."
-        case let .tunnelNotRunning(details):
-            return "Couldn't reach the iPhone. iOS 17+ needs the device tunnel running (sudo pymobiledevice3 remote tunneld)."
-                + (details.isEmpty ? "" : " Details: \(details)")
         case .desktopPermission:
             return "macOS didn't allow RunXcodeApp to save to the Desktop."
         }
@@ -27,7 +18,7 @@ enum ScreenshotError: LocalizedError {
 enum DeviceTools {
     // MARK: - Screenshots
 
-    /// Any destination can be tried; `screenshot(of:label:)` explains what's missing if it can't.
+    /// Any destination can be tried; `screenshot(of:label:)` explains what went wrong if it can't.
     static func canScreenshot(_ destination: Simulator?) -> Bool { destination != nil }
 
     /// Screenshots are saved to the Desktop. (The first time, macOS may ask to allow
@@ -64,6 +55,21 @@ enum DeviceTools {
                 throw RunError.toolMissing("\(destination.name) is shut down. Boot it first.")
             }
             try await Shell.checked(Shell.xcrunPath, ["simctl", "io", destination.udid, "screenshot", url.path])
+        case .device:
+            // Xcode command-line tools only: `xcrun simctl io <udid> screenshot <file>`.
+            // simctl is meant for simulators, so a physical device may be refused; show Xcode's own error.
+            guard !destination.isOffline else {
+                throw RunError.toolMissing("\(destination.name) is offline.")
+            }
+            let result = try await Shell.run(Shell.xcrunPath, ["simctl", "io", destination.udid, "screenshot", url.path])
+            if !result.succeeded || !FileManager.default.fileExists(atPath: url.path) {
+                let output = (result.stderr.isEmpty ? result.stdout : result.stderr)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                throw RunError.toolMissing(
+                    "xcrun simctl couldn't capture \(destination.name) (simctl only supports simulators)."
+                        + (output.isEmpty ? "" : " Xcode said: \(output)")
+                )
+            }
         case .androidEmulator, .androidDevice:
             guard let adb = AndroidSDK.adb else { throw AndroidError.sdkNotFound }
             guard let serial = destination.serial else {
@@ -73,61 +79,7 @@ enum DeviceTools {
             try await Shell.checked(adb, ["-s", serial, "shell", "screencap", "-p", remote])
             try await Shell.checked(adb, ["-s", serial, "pull", remote, url.path])
             _ = try? await Shell.run(adb, ["-s", serial, "shell", "rm", remote])
-        case .device:
-            guard !destination.isOffline else {
-                throw RunError.toolMissing("\(destination.name) is offline.")
-            }
-            try await appleDeviceScreenshot(destination, to: url)
         }
-    }
-
-    /// Physical iPhone/iPad (USB or Wi-Fi). Apple doesn't ship a command-line screenshot tool
-    /// (Xcode uses private frameworks), so this uses community tools when they're installed:
-    /// pymobiledevice3 (iOS 17+, needs its tunnel daemon) or libimobiledevice's idevicescreenshot.
-    private static func appleDeviceScreenshot(_ device: Simulator, to url: URL) async throws {
-        var failures: [String] = []
-
-        if let pymobiledevice3 = Shell.which("pymobiledevice3") {
-            let attempts: [[String]] = [
-                // iOS 17+: goes through the tunnel started by `sudo pymobiledevice3 remote tunneld`.
-                ["developer", "dvt", "screenshot", "--tunnel", device.udid, url.path],
-                // iOS 16 and earlier (USB / paired Wi-Fi).
-                ["developer", "screenshot", "--udid", device.udid, url.path],
-            ]
-            for arguments in attempts {
-                let result = try await Shell.run(pymobiledevice3, arguments)
-                if result.succeeded, FileManager.default.fileExists(atPath: url.path) { return }
-                failures.append("pymobiledevice3 \(arguments.prefix(3).joined(separator: " ")): \(summary(result))")
-            }
-        }
-
-        if let idevicescreenshot = Shell.which("idevicescreenshot") {
-            var arguments = ["-u", device.udid]
-            if device.transport == "Wi-Fi" { arguments.append("-n") }  // network (Wi-Fi) connection
-            arguments.append(url.path)
-            let result = try await Shell.run(idevicescreenshot, arguments)
-            if result.succeeded, FileManager.default.fileExists(atPath: url.path) { return }
-            failures.append("idevicescreenshot: \(summary(result))")
-        }
-
-        // Nothing usable installed (or only idevicescreenshot, which rarely works on iOS 17+).
-        if failures.isEmpty || pymobiledevice3Path == nil {
-            throw ScreenshotError.helperMissing
-        }
-        let details = failures.joined(separator: " · ")
-        let lowered = details.lowercased()
-        let looksLikeConnection = ["tunnel", "rsd", "unable to connect", "connection", "no device", "not found"]
-            .contains { lowered.contains($0) }
-        if needsTunnel(device) || looksLikeConnection {
-            throw ScreenshotError.tunnelNotRunning(details: details)
-        }
-        throw RunError.toolMissing("Couldn't capture \(device.name). \(details)")
-    }
-
-    private static func summary(_ result: ShellResult) -> String {
-        let text = (result.stderr.isEmpty ? result.stdout : result.stderr)
-            .split(whereSeparator: \.isNewline).last.map(String.init) ?? "exit \(result.status)"
-        return String(text.prefix(140))
     }
 
     /// Copies the image file to the clipboard.
@@ -143,70 +95,6 @@ enum DeviceTools {
         formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
         let safe = label.replacingOccurrences(of: "/", with: "-")
         return screenshotsFolder.appendingPathComponent("\(safe) \(formatter.string(from: Date())).png")
-    }
-
-    // MARK: - iPhone screenshot helper (pymobiledevice3)
-
-    static var pymobiledevice3Path: String? { Shell.which("pymobiledevice3") }
-
-    /// True if some tool that can screenshot a physical iPhone is installed.
-    static var hasAppleDeviceHelper: Bool {
-        pymobiledevice3Path != nil || Shell.which("idevicescreenshot") != nil
-    }
-
-    static var brewPath: String? {
-        ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
-            .first { FileManager.default.isExecutableFile(atPath: $0) } ?? Shell.which("brew")
-    }
-
-    /// iOS 17+ devices are only reachable through pymobiledevice3's tunnel daemon.
-    static func needsTunnel(_ device: Simulator) -> Bool {
-        guard device.kind == .device, pymobiledevice3Path != nil else { return false }
-        let major = Int(device.version.split(separator: ".").first ?? "") ?? 17
-        return major >= 17
-    }
-
-    static func isTunnelRunning() async -> Bool {
-        let result = try? await Shell.run("/usr/bin/pgrep", ["-f", "pymobiledevice3 remote tunneld"])
-        return result?.succeeded ?? false
-    }
-
-    /// Installs pymobiledevice3 with Homebrew + pipx (asks first in the UI). Takes about a minute.
-    static func installAppleDeviceHelper() async throws {
-        guard let brew = brewPath else {
-            throw RunError.toolMissing("Homebrew isn't installed. Install it from https://brew.sh, then click Screenshot again.")
-        }
-        if Shell.which("pipx") == nil {
-            try await Shell.checked(brew, ["install", "pipx"])
-        }
-        let brewBin = (brew as NSString).deletingLastPathComponent
-        let pipx = Shell.which("pipx") ?? (brewBin as NSString).appendingPathComponent("pipx")
-        try await Shell.checked(pipx, ["install", "pymobiledevice3"])
-        guard pymobiledevice3Path != nil else {
-            throw RunError.toolMissing("pymobiledevice3 was installed but couldn't be found. Run `pipx ensurepath`, then restart RunXcodeApp.")
-        }
-    }
-
-    /// Opens Terminal running `sudo pymobiledevice3 remote tunneld`, so the user types their own password
-    /// and can see what runs. Uses a .command file, so no Automation permission is needed.
-    static func startTunnelInTerminal() throws {
-        guard let tool = pymobiledevice3Path else {
-            throw RunError.toolMissing("pymobiledevice3 isn't installed.")
-        }
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("RunXcodeApp", isDirectory: true)
-        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
-        let script = support.appendingPathComponent("start-ios-tunnel.command")
-        let contents = """
-        #!/bin/bash
-        echo "RunXcodeApp: starting the iOS device tunnel (needed for iPhone screenshots on iOS 17+)."
-        echo "Enter your Mac password if asked, then keep this window open."
-        echo
-        sudo '\(tool)' remote tunneld
-        """
-        try contents.write(to: script, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
-        open(script, with: terminal)
     }
 
     // MARK: - Opening the project

@@ -11,12 +11,7 @@ The popup, top to bottom:
 3. **Actions** for the selected project:
    - **Run on <device>** (⌘R) or **Stop** (⌘.), plus **Hot Reload** (⌘R) and hot restart (⇧⌘R) for Flutter
    - **Show / Hide Logs**, the live build log for this project
-   - **Screenshot**, which saves the target device's screen to the **Desktop** and copies it to the clipboard (the first time, allow RunXcodeApp to access the Desktop folder if macOS asks; you can change this in System Settings › Privacy & Security › Files and Folders). Simulators, Android emulators and Android phones work out of the box. **Physical iPhones** (USB or Wi-Fi) need [pymobiledevice3](https://github.com/doronz88/pymobiledevice3), because Apple doesn't ship a command-line screenshot tool (Xcode uses private frameworks). The app sets this up for you, asking first:
-     - **Missing tool:** if it isn't installed, the app offers to **Install** it, running `brew install pipx` and `pipx install pymobiledevice3` (needs Homebrew).
-     - **iOS 17+ tunnel:** if the device tunnel isn't running, the app offers to **Open Terminal** with `sudo pymobiledevice3 remote tunneld`. Enter your password there and keep the window open.
-
-     Messages under the buttons have an ✕ to dismiss them, and they clear when the popup closes.
-     libimobiledevice's `idevicescreenshot` is also tried if it's installed (mainly works for iOS 16 and earlier).
+   - **Screenshot**, which saves the target device's screen to the **Desktop** and copies it to the clipboard. It uses only Xcode's own command, `xcrun simctl io <udid> screenshot <file>`, for Apple targets, and `adb` for Android. Simulators and Android emulators and phones work. For a **physical iPhone** the app tries the same `simctl` command and shows Xcode's reply if it refuses, since `simctl` is designed for simulators. The first time, allow RunXcodeApp to access the Desktop folder if macOS asks. If saving is blocked, the error offers **Open Privacy Settings**. Messages have an ✕ and clear when the popup closes.
    - **Open in Xcode / Android Studio / VS Code**, **Reveal in Finder**, **Open in Terminal**
    - **Reload Schemes** (Xcode) or **Open Log File**
    - For Xcode projects, the scheme picker sits in the Actions header.

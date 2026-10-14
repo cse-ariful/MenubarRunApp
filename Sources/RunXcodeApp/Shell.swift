@@ -31,7 +31,7 @@ enum Shell {
         var extra = [
             "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
             "\(home)/development/flutter/bin", "\(home)/flutter/bin", "\(home)/fvm/default/bin",
-            "\(home)/.pub-cache/bin", "\(home)/.local/bin",  // pipx (pymobiledevice3)
+            "\(home)/.pub-cache/bin", "\(home)/.local/bin",
         ]
         if let sdk = env["ANDROID_HOME"] ?? env["ANDROID_SDK_ROOT"] ?? defaultAndroidSDK {
             env["ANDROID_HOME"] = sdk
