@@ -15,6 +15,11 @@ The popup, top to bottom:
    - **Open in Xcode / Android Studio / VS Code**, **Reveal in Finder**, **Open in Terminal**
    - **Reload Schemes** (Xcode) or **Open Log File**
    - For Xcode projects, the scheme picker sits in the Actions header.
+   - **Git** appears when the project is in a git repository:
+     - **Status:** the current branch, ↑ commits to push, ↓ commits to pull, and the number of changed files.
+     - **Branch menu:** switch to any local branch, check out a remote branch (`git switch --track`), or **New Branch from <current>…** (`git switch -c`).
+     - **Fetch** (`git fetch --all --prune`), **Pull** (`git pull --ff-only`, so it never creates a merge commit) and **Push** (`git push`, or `git push -u origin <branch>` the first time).
+     - **No password prompts:** git never stops to ask for a password. HTTPS uses your Keychain, SSH uses your loaded keys (`ssh-add --apple-use-keychain`), and missing credentials show an error instead of hanging.
 4. **Add Folder…** Its ⋯ menu has tracked folders, removed projects and Launch at Login.
 5. **Quit RunXcodeApp** (⌘Q).
 
@@ -145,6 +150,7 @@ After either one, users install or upgrade with `brew install --cask cse-ariful/
 | `SimulatorStore.swift` | `simctl` listing, polling, boot and shutdown |
 | `ProjectStore.swift` | Tracked folders, project scanning, schemes |
 | `BuildRunner.swift` | Build and run pipelines for Xcode, Flutter and Android, plus the log |
+| `Git.swift` | Git status, fetch/pull/push, switching and creating branches |
 | `DeviceTools.swift` | Screenshots; opening a project in Xcode, Android Studio, VS Code or Terminal |
 | `AndroidSDK.swift` | adb and emulator discovery; starting and stopping emulators |
 | `Shell.swift` | Process helpers (buffered and streaming) |

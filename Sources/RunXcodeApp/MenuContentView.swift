@@ -574,6 +574,9 @@ private struct ActionsSection: View {
                 )
             }
 
+            GitPanel(project: project)
+                .id(project.id)
+
             if showLog {
                 LogPanel()
             }
@@ -838,6 +841,193 @@ private struct MessageBanner: View {
             .buttonStyle(.plain)
             .help("Dismiss")
         }
+    }
+}
+
+// MARK: - Git (current branch, fetch / pull / push, switch & create branches)
+
+private struct GitPanel: View {
+    let project: XcodeProject
+
+    @State private var status: GitStatus? = nil
+    @State private var busy: String? = nil
+    @State private var message: String? = nil
+    @State private var messageIsError = false
+    @State private var isCreatingBranch = false
+    @State private var newBranchName = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let status {
+                Divider().padding(.vertical, 2)
+
+                HStack(spacing: 6) {
+                    SectionHeader(title: "Git", systemImage: "arrow.triangle.branch")
+                    Spacer()
+                    if let busy {
+                        ProgressView().controlSize(.mini)
+                        Text(busy).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Button {
+                        Task { await refresh() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(busy != nil)
+                    .help("Refresh git status")
+                }
+
+                HStack(spacing: 8) {
+                    branchMenu(status)
+                    Text(syncSummary(status))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+
+                HStack(spacing: 6) {
+                    ActionTile(title: "Fetch", systemImage: "arrow.down.circle", disabled: busy != nil) {
+                        perform("Fetching…", success: "Fetched.") { try await Git.fetch(status) }
+                    }
+                    ActionTile(title: status.behind > 0 ? "Pull ↓\(status.behind)" : "Pull",
+                               systemImage: "arrow.down.to.line",
+                               disabled: busy != nil || status.upstream == nil || status.isDetached) {
+                        perform("Pulling…", success: "Pulled \(status.branch).") { try await Git.pull(status) }
+                    }
+                    .help(status.upstream == nil ? "This branch has no upstream yet. Push it first." : "git pull --ff-only")
+                    ActionTile(title: status.ahead > 0 ? "Push ↑\(status.ahead)" : "Push",
+                               systemImage: "arrow.up.to.line",
+                               disabled: busy != nil || status.isDetached) {
+                        perform("Pushing…", success: "Pushed \(status.branch).") { try await Git.push(status) }
+                    }
+                    .help(status.upstream == nil ? "Push and set upstream (git push -u)" : "git push")
+                }
+
+                if isCreatingBranch {
+                    HStack(spacing: 6) {
+                        TextField("new-branch-name", text: $newBranchName)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.callout)
+                            .onSubmit { createBranch(from: status) }
+                        Button("Create") { createBranch(from: status) }
+                            .controlSize(.small)
+                            .buttonStyle(.borderedProminent)
+                            .disabled(newBranchName.trimmingCharacters(in: .whitespaces).isEmpty || busy != nil)
+                        Button {
+                            isCreatingBranch = false
+                        } label: {
+                            Image(systemName: "xmark")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Cancel")
+                    }
+                    Text("Creates the branch from \(status.branch) and switches to it.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let message {
+                    MessageBanner(text: message, isError: messageIsError, onDismiss: {
+                        withAnimation { self.message = nil }
+                    })
+                }
+            } else {
+                // Not a git repository (or not loaded yet): show nothing.
+                Color.clear.frame(height: 0)
+            }
+        }
+        .task(id: project.id) { await refresh() }
+        .onDisappear { message = nil; isCreatingBranch = false }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            message = nil
+        }
+    }
+
+    private func branchMenu(_ status: GitStatus) -> some View {
+        Menu {
+            Section("Local Branches") {
+                ForEach(status.localBranches, id: \.self) { branch in
+                    Button {
+                        perform("Switching…", success: "Switched to \(branch).") {
+                            try await Git.switchTo(branch, in: status)
+                        }
+                    } label: {
+                        if branch == status.branch {
+                            Label(branch, systemImage: "checkmark")
+                        } else {
+                            Text(branch)
+                        }
+                    }
+                    .disabled(branch == status.branch)
+                }
+            }
+            if !status.remoteBranches.isEmpty {
+                Menu("Remote Branches") {
+                    ForEach(status.remoteBranches, id: \.self) { remote in
+                        Button(remote) {
+                            perform("Checking out…", success: "Switched to \(remote).") {
+                                try await Git.checkoutRemote(remote, in: status)
+                            }
+                        }
+                    }
+                }
+            }
+            Divider()
+            Button("New Branch from \(status.isDetached ? "HEAD" : status.branch)…") {
+                newBranchName = ""
+                withAnimation { isCreatingBranch = true }
+            }
+        } label: {
+            Label(status.isDetached ? "detached HEAD" : status.branch, systemImage: "arrow.triangle.branch")
+                .font(.callout.weight(.medium))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .disabled(busy != nil)
+        .help("Switch branch or create a new one")
+    }
+
+    private func syncSummary(_ status: GitStatus) -> String {
+        var parts: [String] = []
+        if let upstream = status.upstream {
+            parts.append(status.ahead == 0 && status.behind == 0 ? "up to date with \(upstream)" : "↑\(status.ahead) ↓\(status.behind)")
+        } else if !status.isDetached {
+            parts.append("not pushed yet")
+        }
+        if status.changes > 0 { parts.append("\(status.changes) changed") }
+        return parts.joined(separator: " · ")
+    }
+
+    private func createBranch(from status: GitStatus) {
+        let name = newBranchName
+        perform("Creating branch…", success: "Created and switched to \(name.trimmingCharacters(in: .whitespaces)).") {
+            try await Git.createBranch(name, in: status)
+        }
+        isCreatingBranch = false
+    }
+
+    private func perform(_ label: String, success: String, _ operation: @escaping () async throws -> Void) {
+        guard busy == nil else { return }
+        busy = label
+        message = nil
+        Task {
+            do {
+                try await operation()
+                message = success
+                messageIsError = false
+            } catch {
+                message = error.localizedDescription
+                messageIsError = true
+            }
+            busy = nil
+            await refresh()
+        }
+    }
+
+    private func refresh() async {
+        status = await Git.status(for: project.directory)
     }
 }
 
