@@ -160,12 +160,13 @@ struct ProjectPickerRow: View {
                     .layoutPriority(1)
                     Spacer(minLength: 4)
                     if runner.runningCount > 0 {
-                        Text("\(runner.runningCount) running")
-                            .font(.caption2.weight(.semibold))
+                        Text("\(runner.runningCount)")
+                            .font(.caption2.weight(.semibold).monospacedDigit())
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
                             .background(Capsule().fill(Color.green.opacity(0.2)))
                             .foregroundStyle(.green)
+                            .help("\(runner.runningCount) project\(runner.runningCount == 1 ? "" : "s") running")
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -321,12 +322,10 @@ struct SimulatorRow: View {
             }
 
             if let error = simulators.lastError {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(3)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, 38)
+                MessageBanner(text: error, isError: true, onDismiss: {
+                    withAnimation { simulators.clearError() }
+                })
+                .padding(.leading, 38)
             }
         }
         .listRow()
@@ -560,6 +559,16 @@ private struct RunControls: View {
                     .onTapGesture { LogWindow.show(project: project, runner: runner) }
                     .help("Click to open the logs")
             }
+
+            // Why the run failed; ✕ dismisses it, clicking the text opens the logs.
+            if case let .failed(message) = phase {
+                MessageBanner(
+                    text: message,
+                    isError: true,
+                    onTap: { LogWindow.show(project: project, runner: runner) },
+                    onDismiss: { withAnimation { session?.dismissFailure() } }
+                )
+            }
         }
         .onChange(of: project.id) { _ in toolMessage = nil }
     }
@@ -704,12 +713,7 @@ private struct RunControls: View {
                     Text("· \(warnings) warning\(warnings == 1 ? "" : "s")").foregroundStyle(.orange)
                 }
             }
-            if case let .failed(message) = phase {
-                Text(message)
-                    .foregroundStyle(.red)
-                    .lineLimit(3)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if isRunningThis, let detail = session?.statusDetail, !detail.isEmpty {
+            if isRunningThis, let detail = session?.statusDetail, !detail.isEmpty {
                 Text(detail)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)

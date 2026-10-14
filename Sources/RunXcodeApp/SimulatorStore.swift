@@ -7,6 +7,9 @@ final class SimulatorStore: ObservableObject {
     @Published private(set) var groups: [RuntimeGroup] = []
     @Published private(set) var isLoading = false
     @Published private(set) var lastError: String?
+
+    /// Dismisses the error shown under the device row.
+    func clearError() { lastError = nil }
     @Published private(set) var busyUDIDs: Set<String> = []
     @Published var selectedUDID: String? {
         didSet { UserDefaults.standard.set(selectedUDID, forKey: Defaults.selectedSimulator) }

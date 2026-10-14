@@ -272,6 +272,11 @@ final class RunSession: ObservableObject {
         }
     }
 
+    /// Dismisses a failed run's message in the popup (the log keeps the details).
+    func dismissFailure() {
+        if case .failed = phase { phase = .idle }
+    }
+
     /// Empties the log window's view of this session (the log file is kept).
     func clearLog() {
         flushPending()
@@ -494,17 +499,21 @@ final class RunSession: ObservableObject {
         }
 
         if target.kind == .device {
+            // Like Xcode: unbuffered stdout so `print` arrives right away (it's fully buffered without a
+            // terminal), and OS_ACTIVITY_DT_MODE so NSLog / os_log / Logger are mirrored to stderr,
+            // which is what `devicectl --console` forwards. Your own variables win.
+            let environment = Self.consoleEnvironment.merging(target.environment) { _, custom in custom }
             var environmentFlag: [String] = []
-            if !target.environment.isEmpty,
-               let json = try? JSONSerialization.data(withJSONObject: target.environment),
+            if let json = try? JSONSerialization.data(withJSONObject: environment, options: [.sortedKeys]),
                let text = String(data: json, encoding: .utf8) {
                 environmentFlag = ["--environment-variables", text]
             }
             try await launchWithConsole(
                 ["devicectl", "device", "process", "launch", "--console", "--terminate-existing",
                  "--device", target.udid] + environmentFlag + [target.appID] + target.arguments,
+                // Older devicectl without --console / --environment-variables: plain launch, no live logs.
                 fallback: ["devicectl", "device", "process", "launch", "--device", target.udid,
-                           "--terminate-existing"] + environmentFlag + [target.appID] + target.arguments,
+                           "--terminate-existing", target.appID] + target.arguments,
                 environment: [:],
                 appName: target.appName,
                 destination: target.destinationName,
@@ -514,8 +523,10 @@ final class RunSession: ObservableObject {
             // --console-pty streams the app's stdout/stderr (print, NSLog) and passes Stop (SIGINT) to the app.
             // SIMCTL_CHILD_ variables reach the app's environment; OS_ACTIVITY_DT_MODE also mirrors
             // os_log / Logger output, like Xcode's console.
-            var environment = ["SIMCTL_CHILD_OS_ACTIVITY_DT_MODE": "enable"]
-            for (key, value) in target.environment { environment["SIMCTL_CHILD_" + key] = value }
+            var environment: [String: String] = [:]
+            for (key, value) in Self.consoleEnvironment.merging(target.environment, uniquingKeysWith: { _, custom in custom }) {
+                environment["SIMCTL_CHILD_" + key] = value
+            }
             try await launchWithConsole(
                 ["simctl", "launch", "--console-pty", "--terminate-running-process", target.udid, target.appID]
                     + target.arguments,
@@ -528,6 +539,13 @@ final class RunSession: ObservableObject {
             )
         }
     }
+
+    /// What Xcode sets so an app's console output shows up live: unbuffered stdio for `print`,
+    /// and os_log / Logger / NSLog mirrored to stderr.
+    private static let consoleEnvironment = [
+        "NSUnbufferedIO": "YES",
+        "OS_ACTIVITY_DT_MODE": "enable",
+    ]
 
     /// Launches with the app's console attached and streams its output until the app exits or Stop.
     /// If this Xcode's tool doesn't know the console option, launches without it (no live logs).
