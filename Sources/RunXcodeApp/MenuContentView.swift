@@ -509,6 +509,7 @@ private struct ActionsSection: View {
             // Git (branch + fetch / pull / push) sits above the actions.
             GitPanel(project: project)
                 .id(project.id)
+                .padding(.horizontal, -8)
 
             HStack(spacing: 6) {
                 SectionHeader(title: "Actions", systemImage: "bolt.horizontal")
@@ -845,8 +846,10 @@ private struct MessageBanner: View {
     }
 }
 
-// MARK: - Git (current branch, fetch / pull / push, switch & create branches)
+// MARK: - Git (branch row → native submenu with pull / push / fetch / new branch / branches)
 
+/// Full-width branch row. Hovering (or clicking) opens a native menu to its right, like a submenu:
+/// Pull, Push, Fetch, New Branch…, Refresh, then local and remote branches.
 private struct GitPanel: View {
     let project: XcodeProject
 
@@ -856,70 +859,18 @@ private struct GitPanel: View {
     @State private var messageIsError = false
     @State private var isCreatingBranch = false
     @State private var newBranchName = ""
+    @State private var anchor = MenuAnchorBox()
+    @State private var hovering = false
+    /// After the menu closes, don't reopen until the pointer leaves and re-enters the row.
+    @State private var suppressHover = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 6) {
             if let status {
-                HStack(spacing: 8) {
-                    branchMenu(status)
-                    Text(busy ?? syncSummary(status))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    Spacer(minLength: 0)
-                    if busy != nil {
-                        ProgressView().controlSize(.mini)
-                    } else {
-                        Button {
-                            Task { await refresh() }
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Refresh git status")
-                    }
-                }
-
-                HStack(spacing: 6) {
-                    ActionTile(title: "Fetch", systemImage: "arrow.down.circle", disabled: busy != nil) {
-                        perform("Fetching…", success: "Fetched.") { try await Git.fetch(status) }
-                    }
-                    ActionTile(title: status.behind > 0 ? "Pull ↓\(status.behind)" : "Pull",
-                               systemImage: "arrow.down.to.line",
-                               disabled: busy != nil || status.upstream == nil || status.isDetached) {
-                        perform("Pulling…", success: "Pulled \(status.branch).") { try await Git.pull(status) }
-                    }
-                    .help(status.upstream == nil ? "This branch has no upstream yet. Push it first." : "git pull --ff-only")
-                    ActionTile(title: status.ahead > 0 ? "Push ↑\(status.ahead)" : "Push",
-                               systemImage: "arrow.up.to.line",
-                               disabled: busy != nil || status.isDetached) {
-                        perform("Pushing…", success: "Pushed \(status.branch).") { try await Git.push(status) }
-                    }
-                    .help(status.upstream == nil ? "Push and set upstream (git push -u)" : "git push")
-                }
+                branchRow(status)
 
                 if isCreatingBranch {
-                    HStack(spacing: 6) {
-                        TextField("new-branch-name", text: $newBranchName)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.callout)
-                            .onSubmit { createBranch(from: status) }
-                        Button("Create") { createBranch(from: status) }
-                            .controlSize(.small)
-                            .buttonStyle(.borderedProminent)
-                            .disabled(newBranchName.trimmingCharacters(in: .whitespaces).isEmpty || busy != nil)
-                        Button {
-                            isCreatingBranch = false
-                        } label: {
-                            Image(systemName: "xmark")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Cancel")
-                    }
-                    Text("Creates the branch from \(status.branch) and switches to it.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    newBranchField(status)
                 }
 
                 if let message {
@@ -941,49 +892,157 @@ private struct GitPanel: View {
         }
     }
 
-    private func branchMenu(_ status: GitStatus) -> some View {
-        Menu {
-            Section("Local Branches") {
-                ForEach(status.localBranches, id: \.self) { branch in
-                    Button {
-                        perform("Switching…", success: "Switched to \(branch).") {
-                            try await Git.switchTo(branch, in: status)
-                        }
-                    } label: {
-                        if branch == status.branch {
-                            Label(branch, systemImage: "checkmark")
-                        } else {
-                            Text(branch)
-                        }
-                    }
-                    .disabled(branch == status.branch)
-                }
+    // MARK: Row
+
+    private func branchRow(_ status: GitStatus) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.title3)
+                .foregroundStyle(.tint)
+                .frame(width: 28, height: 28)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(status.isDetached ? "detached HEAD" : status.branch)
+                    .font(.body.weight(.semibold))
+                    .lineLimit(1)
+                Text(busy ?? syncSummary(status))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
-            if !status.remoteBranches.isEmpty {
-                Menu("Remote Branches") {
-                    ForEach(status.remoteBranches, id: \.self) { remote in
-                        Button(remote) {
-                            perform("Checking out…", success: "Switched to \(remote).") {
-                                try await Git.checkoutRemote(remote, in: status)
-                            }
-                        }
-                    }
-                }
+            Spacer(minLength: 4)
+            if busy != nil {
+                ProgressView().controlSize(.small)
             }
-            Divider()
-            Button("New Branch from \(status.isDetached ? "HEAD" : status.branch)…") {
-                newBranchName = ""
-                withAnimation { isCreatingBranch = true }
-            }
-        } label: {
-            Label(status.isDetached ? "detached HEAD" : status.branch, systemImage: "arrow.triangle.branch")
-                .font(.callout.weight(.medium))
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.secondary)
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .disabled(busy != nil)
-        .help("Switch branch or create a new one")
+        .contentShape(Rectangle())
+        .listRow()
+        .background(MenuAnchor(box: anchor))
+        .onHover { inside in
+            hovering = inside
+            guard inside else {
+                suppressHover = false
+                return
+            }
+            guard !suppressHover else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                if hovering, !suppressHover, busy == nil { openMenu() }
+            }
+        }
+        .onTapGesture { openMenu() }
+        .help("Git: pull, push, fetch, branches")
     }
+
+    private func newBranchField(_ status: GitStatus) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                TextField("new-branch-name", text: $newBranchName)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.callout)
+                    .onSubmit { createBranch(from: status) }
+                Button("Create") { createBranch(from: status) }
+                    .controlSize(.small)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(newBranchName.trimmingCharacters(in: .whitespaces).isEmpty || busy != nil)
+                Button {
+                    isCreatingBranch = false
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .help("Cancel")
+            }
+            Text("Creates the branch from \(status.isDetached ? "HEAD" : status.branch) and switches to it.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 8)
+    }
+
+    // MARK: Menu
+
+    private func openMenu() {
+        guard let status, busy == nil, let view = anchor.view else { return }
+        suppressHover = true
+        let menu = buildMenu(status)
+        // Show it to the right of the row, top-aligned, like a submenu.
+        let point = NSPoint(x: view.bounds.maxX + 2, y: view.isFlipped ? view.bounds.minY : view.bounds.maxY)
+        DispatchQueue.main.async {
+            _ = menu.popUp(positioning: nil, at: point, in: view)
+        }
+    }
+
+    private func buildMenu(_ status: GitStatus) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        menu.addItem(ClosureMenuItem(
+            title: status.behind > 0 ? "Pull  ↓\(status.behind)" : "Pull",
+            symbol: "arrow.down.to.line",
+            enabled: status.upstream != nil && !status.isDetached
+        ) { perform("Pulling…", success: "Pulled \(status.branch).") { try await Git.pull(status) } })
+
+        menu.addItem(ClosureMenuItem(
+            title: status.ahead > 0 ? "Push  ↑\(status.ahead)" : (status.upstream == nil ? "Push (set upstream)" : "Push"),
+            symbol: "arrow.up.to.line",
+            enabled: !status.isDetached
+        ) { perform("Pushing…", success: "Pushed \(status.branch).") { try await Git.push(status) } })
+
+        menu.addItem(ClosureMenuItem(title: "Fetch", symbol: "arrow.down.circle") {
+            perform("Fetching…", success: "Fetched.") { try await Git.fetch(status) }
+        })
+
+        menu.addItem(ClosureMenuItem(
+            title: "New Branch from \(status.isDetached ? "HEAD" : status.branch)…",
+            symbol: "plus"
+        ) {
+            newBranchName = ""
+            withAnimation { isCreatingBranch = true }
+        })
+
+        menu.addItem(ClosureMenuItem(title: "Refresh Status", symbol: "arrow.clockwise") {
+            Task { await refresh() }
+        })
+
+        menu.addItem(.separator())
+        menu.addItem(Self.header("Local Branches"))
+        for branch in status.localBranches {
+            let isCurrent = branch == status.branch
+            let item = ClosureMenuItem(title: branch, symbol: nil, enabled: !isCurrent) {
+                perform("Switching…", success: "Switched to \(branch).") { try await Git.switchTo(branch, in: status) }
+            }
+            item.state = isCurrent ? .on : .off
+            menu.addItem(item)
+        }
+
+        if !status.remoteBranches.isEmpty {
+            menu.addItem(.separator())
+            menu.addItem(Self.header("Remote Branches"))
+            for remote in status.remoteBranches {
+                menu.addItem(ClosureMenuItem(title: remote, symbol: nil) {
+                    perform("Checking out…", success: "Switched to \(remote).") {
+                        try await Git.checkoutRemote(remote, in: status)
+                    }
+                })
+            }
+        }
+        return menu
+    }
+
+    private static func header(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        item.attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ])
+        return item
+    }
+
+    // MARK: Helpers
 
     private func syncSummary(_ status: GitStatus) -> String {
         var parts: [String] = []
@@ -1025,6 +1084,46 @@ private struct GitPanel: View {
     private func refresh() async {
         status = await Git.status(for: project.directory)
     }
+}
+
+/// Holds the AppKit view behind a SwiftUI row so a native NSMenu can be popped up next to it.
+private final class MenuAnchorBox {
+    weak var view: NSView?
+}
+
+private struct MenuAnchor: NSViewRepresentable {
+    let box: MenuAnchorBox
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        box.view = view
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        box.view = nsView
+    }
+}
+
+/// NSMenuItem that runs a closure.
+private final class ClosureMenuItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(title: String, symbol: String?, enabled: Bool = true, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(fire), keyEquivalent: "")
+        target = self
+        isEnabled = enabled
+        if let symbol {
+            image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        }
+    }
+
+    required init(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    @objc private func fire() { handler() }
 }
 
 private struct ActionTile: View {
