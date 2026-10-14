@@ -7,12 +7,21 @@ A macOS menu bar app that builds and runs your **Xcode**, **Flutter** and **Andr
 The popup, top to bottom. The device, project and git rows open **drill-in pages**: the popup is replaced by that row at the top with a search field (already focused) and its full list below. The tapped row glides to the top while the popup keeps its height, so nothing jumps. Click the row again (⌃) or press Esc to go back; picking an item goes back too. Closing the popup always returns to the main view.
 
 1. **Target device** of the selected project. Click it to open the **devices page**: a searchable list (by name or runtime) of only the devices that project type supports (Apple targets for Xcode, Android for Android, both for Flutter), grouped by runtime, with ✓ on the current one and a green dot on running simulators. Return picks the first match. Each project remembers its own choice. A **Running** section at the top shuts down any running simulator, or all of them. **Boot** / **Shut Down** on the row acts on the selected simulator using its live state.
-   - Right under the device: **Run on <device>** (⌘R) or **Stop** (⌘.), plus **Hot Reload** (⌘R) and hot restart (⇧⌘R) for Flutter, and the run status line (click it to open the logs).
+   - Right under the device: **Run on <device>** (⌘R; it shows non-default options, e.g. "Run on Pixel 8 · Release · staging") or, while running, **Stop** (⌘.) with **Reload** (⌘R) and **Restart** (⇧⌘R) for Flutter, or **Run Again** for Xcode and Android. Then the run status line (click it to open the logs).
+   - **⋯ menu** next to the buttons, with actions for the project type (results show as a message under the buttons and in the log):
+     - **Flutter:** while running, Open DevTools, Toggle Widget Inspector, Performance Overlay, Debug Paint, iOS/Android look, and Detach (keeps the app running). Always: **Run Mode** (Debug / Profile / Release). When idle: `flutter clean`, `flutter pub get`, `flutter pub upgrade`.
+     - **Xcode:** **Relaunch Without Building** (after a run), **Build Only**, **Run Tests**, **Clean Build Folder**, **Uninstall App**. For a booted simulator: **Appearance** (dark/light), **Permissions** (grant all / reset all), **Location** (presets, your custom coordinate, or clear), and **Push Notification** (a test notification, or a `.json`/`.apns` payload file).
+     - **Android:** **Restart App** (after a run), **Clear App Data**, **Dark Mode** on/off, **Apply Port Forwarding** (`adb reverse`), **Gradle Clean**, **Uninstall App**.
+     - **Run Options…** opens the options page for the project, saved per project:
+       - **Flutter:** mode, `--flavor`, entry file (`-t`, with a list of `lib/main*.dart`), `--dart-define` values (one `KEY=VALUE` per line), and ports to `adb reverse` on Android.
+       - **Xcode:** configuration override (empty uses the scheme's), launch arguments, environment variables (one per line), and a custom simulator location.
+       - **Android:** build variant (e.g. `freeDebug`, which installs with `:app:installFreeDebug`) and ports to `adb reverse` after install.
 2. **Project picker.** The selected project. Click it to open the **projects page**: a searchable list (by name, type or path) of the other projects (the selected one is already the header row) with the most recently used first, and the **Archived** section at the bottom (archived matches always show while searching). An **Add Folder…** row stays pinned under the list. Return picks the first match. For Xcode projects, the selected project's row has a compact **scheme picker** on the right, centred on the row (what Run builds; long scheme names are shortened, with the full name in the tooltip). Its menu ends with **Refresh Schemes**; if no schemes were found, the pill says "No schemes" and the menu only offers Refresh Schemes. Rows show a run badge (⏳ building, ⚡ hot reload ready, ✓ launched, ✗ failed), because **several projects can run at the same time**.
 3. **Actions** for the selected project:
    - **Logs** opens a **log window** for the project (one per project) with the live build log. After launch, the log keeps going with the **app's own output** (the row shows a green ⦿ and "Running · live logs"):
      - **Filter bar** at the top: every word you type must appear in a line, so you can filter by a tag, a subsystem or any text. `-word` hides lines containing it, and `"quoted phrases"` stay together. Matches are highlighted. **Aa** matches case, and **.\*** switches to a regular expression.
      - **Level:** All, Errors & Warnings, or Errors (understands Xcode, Gradle and logcat `E/` / `W/` lines).
+     - **Preserve Log** (📌): while it's on, stopping and running again keeps the previous output and adds the new run below a "New run" divider, instead of clearing the log. It turns off when you close the log window.
      - **Follow** keeps scrolling to the newest line; turn it off to read back while output keeps coming. Also **Copy** (the lines shown), **Clear** (the window only; the log file is kept), **Open the full log file**, and ⌘F to find. The status bar shows the run state, error and warning counts, and "Showing N of M lines". The window keeps the last 5,000 lines; the log file has everything.
      - **Simulator:** `xcrun simctl launch --console-pty`. You see `print`, `NSLog`, and `os_log` / `Logger` messages, like Xcode's console. **Stop** quits the app.
      - **iPhone / iPad:** `xcrun devicectl device process launch --console`. **Stop** detaches; the app keeps running on the device.
@@ -59,7 +68,7 @@ A Flutter app's `ios/` and `android/` folders aren't listed as separate projects
 
 **Toolchains:** the app reads `PATH`, `JAVA_HOME` and `ANDROID_HOME` from your login shell, so `flutter`, `adb` and `emulator` resolve the same way they do in Terminal. It falls back to `~/Library/Android/sdk` and Android Studio's bundled JDK.
 
-**Android limitation:** the debug variant is always used. Projects with product flavors (for example `installFreeDebug`) aren't supported yet.
+**Android build variants:** set one in ⋯ › Run Options (for example `freeDebug`); the default is debug.
 
 ## Features
 
@@ -169,6 +178,7 @@ After either one, users install or upgrade with `brew install --cask cse-ariful/
 | `GitViews.swift` | Git model, branch row and git page |
 | `FileBrowserWindow.swift` | Project file browser: file tree, filter, code view with line numbers |
 | `LogWindow.swift` | Log window: filter bar, level filter, follow, live text view |
+| `ProjectTools.swift` | ⋯ menu with per-type actions, and the Run Options page |
 | `MarkdownPreview.swift` | Rendered Markdown for the file browser |
 | `DockPresence.swift` | Shows the Dock icon while an app window is open |
 | `SyntaxHighlighter.swift` | Syntax colouring for the file browser |

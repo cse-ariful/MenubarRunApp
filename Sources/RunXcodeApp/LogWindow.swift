@@ -33,9 +33,13 @@ enum LogWindow {
 
         let controller = NSWindowController(window: window)
         controllers[key] = controller
+        // The session exists from now on, so Preserve Log can be turned on before the first run.
+        let session = runner.session(ensuring: project)
         observers[key] = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
         ) { _ in
+            // Preserve Log only lasts while the window is open.
+            Task { @MainActor in session.preserveLog = false }
             controllers[key] = nil
             if let token = observers.removeValue(forKey: key) {
                 NotificationCenter.default.removeObserver(token)
@@ -61,7 +65,7 @@ enum LogLineKind {
             self = .warning
         } else if line.hasPrefix("✓") || line.contains("** BUILD SUCCEEDED **") || line.hasPrefix("BUILD SUCCESSFUL") {
             self = .success
-        } else if line.hasPrefix("$ ") || line.hasPrefix("▶") || line.hasPrefix("■") {
+        } else if line.hasPrefix("$ ") || line.hasPrefix("▶") || line.hasPrefix("■") || line.hasPrefix("━━") {
             self = .command
         } else {
             self = .normal
@@ -213,7 +217,7 @@ private struct LogWindowView: View {
         VStack(spacing: 0) {
             toolbar(filter: filter, shown: shown)
             Divider()
-            if session == nil {
+            if session == nil || (allLines.isEmpty && session?.phase == .idle) {
                 placeholder
             } else {
                 LogTextView(
@@ -256,6 +260,15 @@ private struct LogWindowView: View {
             Toggle(isOn: $follow) { Image(systemName: "arrow.down.to.line") }
                 .toggleStyle(.button)
                 .help("Follow: keep scrolling to the newest line")
+            Toggle(isOn: Binding(
+                get: { session?.preserveLog ?? false },
+                set: { session?.preserveLog = $0 }
+            )) {
+                Image(systemName: session?.preserveLog == true ? "pin.fill" : "pin")
+            }
+            .toggleStyle(.button)
+            .disabled(session == nil)
+            .help("Preserve Log: keep this output when you stop and run again (new runs are added below a divider). Turns off when this window closes.")
             Button {
                 let pasteboard = NSPasteboard.general
                 pasteboard.clearContents()
@@ -295,6 +308,10 @@ private struct LogWindowView: View {
                 }
             }
             Spacer()
+            if session?.preserveLog == true {
+                Label("Preserving log across runs", systemImage: "pin.fill")
+                    .foregroundStyle(.secondary)
+            }
             Text(shown == total ? "\(total) lines" : "Showing \(shown) of \(total) lines")
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
@@ -386,8 +403,24 @@ private struct LogTextView: NSViewRepresentable {
         state.first = lines.first
 
         if follow {
-            textView.scrollToEndOfDocument(nil)
+            Self.scrollToBottom(scrollView, textView: textView)
         }
+    }
+
+    /// Follow scrolls down only: the horizontal position stays where the user left it,
+    /// even when the newest line is long.
+    private static func scrollToBottom(_ scrollView: NSScrollView, textView: NSTextView) {
+        let clip = scrollView.contentView
+        let x = clip.bounds.origin.x
+        // Lay out the end of the text so the document height includes the newest lines.
+        let length = textView.string.utf16.count
+        if length > 0 {
+            textView.layoutManager?.ensureLayout(forCharacterRange: NSRange(location: length - 1, length: 1))
+        }
+        let documentHeight = textView.frame.height
+        let y = max(0, documentHeight - clip.bounds.height)
+        clip.scroll(to: NSPoint(x: x, y: y))
+        scrollView.reflectScrolledClipView(clip)
     }
 
     private func render(_ slice: ArraySlice<String>, leadingNewline: Bool) -> NSAttributedString {

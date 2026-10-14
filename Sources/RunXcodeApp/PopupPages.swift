@@ -5,6 +5,7 @@ enum PopupPage: Equatable {
     case devices
     case projects
     case git
+    case runOptions
 }
 
 // MARK: - Shared pieces

@@ -81,6 +81,8 @@ struct MenuContentView: View {
             ProjectsPage { show(nil) }
         case .git:
             GitPage { show(nil) }
+        case .runOptions:
+            RunOptionsPage { show(nil) }
         }
     }
 
@@ -88,7 +90,7 @@ struct MenuContentView: View {
         VStack(alignment: .leading, spacing: 0) {
             SimulatorRow { show(.devices) }
             if let project = projects.selectedProject {
-                RunControls(project: project)
+                RunControls(project: project) { show(.runOptions) }
                     .padding(.horizontal, 8)
                     .padding(.top, 4)
                     .padding(.bottom, 2)
@@ -487,6 +489,8 @@ struct RunStateBadge: View {
             Image(systemName: "dot.radiowaves.left.and.right").foregroundStyle(.green).help("Running · live logs")
         case .succeeded:
             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).help("Launched")
+        case let .finished(text):
+            Image(systemName: "checkmark.circle").foregroundStyle(.secondary).help(text)
         case .failed:
             Image(systemName: "xmark.circle.fill").foregroundStyle(.red).help("Last run failed")
         case .cancelled:
@@ -502,6 +506,15 @@ struct RunStateBadge: View {
 /// Status line, Run / Stop (and hot reload for Flutter) for the selected project.
 private struct RunControls: View {
     let project: XcodeProject
+    let openOptions: () -> Void
+
+    private struct ToolMessage: Equatable {
+        let text: String
+        let isError: Bool
+    }
+
+    /// Result of the last ⋯ action (appearance, permissions, push…).
+    @State private var toolMessage: ToolMessage? = nil
 
     @EnvironmentObject private var simulators: SimulatorStore
     @EnvironmentObject private var projects: ProjectStore
@@ -523,6 +536,12 @@ private struct RunControls: View {
                 Text(blocker).font(.caption).foregroundStyle(.secondary)
             }
 
+            if let toolMessage {
+                MessageBanner(text: toolMessage.text, isError: toolMessage.isError, onDismiss: {
+                    withAnimation { self.toolMessage = nil }
+                })
+            }
+
             if phase != .idle {
                 statusLine
                     .contentShape(Rectangle())
@@ -530,6 +549,7 @@ private struct RunControls: View {
                     .help("Click to open the logs")
             }
         }
+        .onChange(of: project.id) { _ in toolMessage = nil }
     }
 
     // MARK: Run / stop / hot reload
@@ -546,7 +566,26 @@ private struct RunControls: View {
                 .controlSize(.large)
                 .keyboardShortcut(".", modifiers: .command)
 
-                if session?.phase == .streaming {
+                if session?.canHotReload == true {
+                    // Flutter: Stop · Reload · Restart
+                    Button {
+                        session?.hotReload()
+                    } label: {
+                        Label("Reload", systemImage: "bolt.fill").frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.large)
+                    .keyboardShortcut("r", modifiers: .command)
+                    .help("Hot reload (⌘R)")
+
+                    Button {
+                        session?.hotRestart()
+                    } label: {
+                        Label("Restart", systemImage: "arrow.clockwise").frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.large)
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+                    .help("Hot restart (⇧⌘R)")
+                } else if session?.phase == .streaming {
                     // Rebuild and relaunch; the current app and its log stream are stopped first.
                     Button {
                         run()
@@ -557,26 +596,6 @@ private struct RunControls: View {
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(runBlocker != nil)
                     .help("Stop, rebuild and relaunch (⌘R)")
-                }
-
-                if session?.canHotReload == true {
-                    Button {
-                        session?.hotReload()
-                    } label: {
-                        Label("Hot Reload", systemImage: "bolt.fill").frame(maxWidth: .infinity)
-                    }
-                    .controlSize(.large)
-                    .keyboardShortcut("r", modifiers: .command)
-                    .help("Hot reload (⌘R)")
-
-                    Button {
-                        session?.hotRestart()
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .controlSize(.large)
-                    .keyboardShortcut("r", modifiers: [.command, .shift])
-                    .help("Hot restart (⇧⌘R)")
                 }
             } else {
                 Button {
@@ -591,12 +610,19 @@ private struct RunControls: View {
                 .keyboardShortcut("r", modifiers: .command)
                 .disabled(runBlocker != nil)
             }
+
+            if !isRunningThis || phase == .attached || phase == .streaming {
+                ProjectToolsMenu(project: project, destination: destination, openOptions: openOptions) { text, isError in
+                    withAnimation { toolMessage = ToolMessage(text: text, isError: isError) }
+                }
+            }
         }
     }
 
     private var runTitle: String {
         guard let destination else { return "Run" }
-        return "Run on \(destination.name)"
+        let suffix = projects.runOptions(for: project).runSuffix(for: project).map { " · \($0)" } ?? ""
+        return "Run on \(destination.name)" + suffix
     }
 
     private var runBlocker: String? {
@@ -610,7 +636,8 @@ private struct RunControls: View {
     private func run() {
         guard runBlocker == nil, let destination else { return }
         projects.markUsed(project)
-        runner.run(project: project, scheme: project.isXcode ? scheme : nil, simulator: destination)
+        runner.run(project: project, scheme: project.isXcode ? scheme : nil, simulator: destination,
+                   options: projects.runOptions(for: project))
     }
 
     private var statusLine: some View {
@@ -1054,6 +1081,8 @@ private struct PhaseIcon: View {
             Image(systemName: "circle.dashed").foregroundStyle(.secondary)
         case .succeeded:
             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        case .finished:
+            Image(systemName: "checkmark.circle").foregroundStyle(.green)
         case .failed:
             Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
         case .cancelled:

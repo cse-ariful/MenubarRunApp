@@ -20,6 +20,8 @@ final class ProjectStore: ObservableObject {
     @Published private var chosenSchemes: [String: String] = [:]
     /// Run destination (simulator/device id) chosen per project.
     @Published private var destinationIDs: [String: String] = [:]
+    /// Run options (Flutter mode/flavor, Xcode launch arguments, Android variant…) per project.
+    @Published private var runOptionsByID: [String: RunOptions] = [:]
     @Published var selectedProjectID: String? {
         didSet {
             guard selectedProjectID != oldValue else { return }
@@ -36,6 +38,10 @@ final class ProjectStore: ObservableObject {
         folders = (defaults.stringArray(forKey: Defaults.trackedFolders) ?? []).map { URL(fileURLWithPath: $0) }
         chosenSchemes = (defaults.dictionary(forKey: Defaults.selectedSchemes) as? [String: String]) ?? [:]
         destinationIDs = (defaults.dictionary(forKey: Defaults.projectDestinations) as? [String: String]) ?? [:]
+        if let data = defaults.data(forKey: Defaults.runOptions),
+           let saved = try? JSONDecoder().decode([String: RunOptions].self, from: data) {
+            runOptionsByID = saved
+        }
         lastUsed = (defaults.dictionary(forKey: Defaults.projectLastUsed) as? [String: Double]) ?? [:]
         archivedIDs = Set(defaults.stringArray(forKey: Defaults.archivedProjects) ?? [])
         removedIDs = Set(defaults.stringArray(forKey: Defaults.removedProjects) ?? [])
@@ -52,6 +58,20 @@ final class ProjectStore: ObservableObject {
     func setDestination(_ udid: String?, for project: XcodeProject) {
         destinationIDs[project.id] = udid
         UserDefaults.standard.set(destinationIDs, forKey: Defaults.projectDestinations)
+    }
+
+    func runOptions(for project: XcodeProject) -> RunOptions {
+        runOptionsByID[project.id] ?? RunOptions()
+    }
+
+    func updateRunOptions(for project: XcodeProject, _ change: (inout RunOptions) -> Void) {
+        var options = runOptions(for: project)
+        change(&options)
+        guard options != runOptions(for: project) else { return }
+        runOptionsByID[project.id] = options
+        if let data = try? JSONEncoder().encode(runOptionsByID) {
+            UserDefaults.standard.set(data, forKey: Defaults.runOptions)
+        }
     }
 
     func setScheme(_ scheme: String?, for project: XcodeProject) {

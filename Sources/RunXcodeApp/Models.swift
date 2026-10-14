@@ -135,6 +135,8 @@ enum RunPhase: Equatable {
     /// Launched and attached to the app's console: its output streams into the log until it exits or Stop.
     case streaming
     case succeeded
+    /// A tool job (clean, pub get, tests…) finished; the text says what.
+    case finished(String)
     case failed(String)
     case cancelled
 
@@ -161,6 +163,7 @@ enum RunPhase: Equatable {
         case .attached: return "Running · hot reload ready"
         case .streaming: return "Running · live logs"
         case .succeeded: return "Running"
+        case let .finished(text): return text
         case .failed: return "Failed"
         case .cancelled: return "Stopped"
         }
@@ -168,11 +171,171 @@ enum RunPhase: Equatable {
 
     var menuBarSymbol: String {
         switch self {
-        case .idle, .cancelled: return "play.square"
+        case .idle, .cancelled, .finished: return "play.square"
         case .succeeded, .streaming: return "play.square.fill"
         case .failed: return "exclamationmark.triangle"
         default: return "hourglass"
         }
+    }
+}
+
+// MARK: - Run options
+
+enum FlutterMode: String, Codable, CaseIterable, Identifiable {
+    case debug, profile, release
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+}
+
+/// Per-project settings that change how Run builds and launches the app.
+struct RunOptions: Codable, Equatable {
+    // Flutter
+    var flutterMode: FlutterMode = .debug
+    /// `--flavor`
+    var flutterFlavor = ""
+    /// `-t`, e.g. lib/main_dev.dart (empty: lib/main.dart)
+    var flutterTarget = ""
+    /// One KEY=VALUE per line, passed as `--dart-define`.
+    var dartDefines = ""
+
+    // Xcode
+    /// Build configuration override (empty: the scheme's Run configuration).
+    var configuration = ""
+    /// Launch arguments, shell-style ("quoted words" stay together).
+    var launchArguments = ""
+    /// One KEY=VALUE per line, passed to the app's environment.
+    var environment = ""
+    /// "latitude, longitude" for Simulator ▸ Location ▸ Custom.
+    var customLocation = ""
+
+    // Android
+    /// Gradle build variant, e.g. "freeDebug" (empty: debug).
+    var androidVariant = ""
+    /// Ports for `adb reverse`, e.g. "8081 3000".
+    var reversePorts = ""
+
+    init() {}
+
+    // Tolerate settings saved by older/newer versions (missing keys keep their defaults).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        flutterMode = (try? c.decode(FlutterMode.self, forKey: .flutterMode)) ?? .debug
+        flutterFlavor = (try? c.decode(String.self, forKey: .flutterFlavor)) ?? ""
+        flutterTarget = (try? c.decode(String.self, forKey: .flutterTarget)) ?? ""
+        dartDefines = (try? c.decode(String.self, forKey: .dartDefines)) ?? ""
+        configuration = (try? c.decode(String.self, forKey: .configuration)) ?? ""
+        launchArguments = (try? c.decode(String.self, forKey: .launchArguments)) ?? ""
+        environment = (try? c.decode(String.self, forKey: .environment)) ?? ""
+        customLocation = (try? c.decode(String.self, forKey: .customLocation)) ?? ""
+        androidVariant = (try? c.decode(String.self, forKey: .androidVariant)) ?? ""
+        reversePorts = (try? c.decode(String.self, forKey: .reversePorts)) ?? ""
+    }
+
+    // MARK: Parsed values
+
+    var dartDefinePairs: [String] { Self.lines(dartDefines).filter { $0.contains("=") } }
+
+    var launchArgumentList: [String] { Self.splitArguments(launchArguments) }
+
+    var environmentPairs: [String: String] {
+        var result: [String: String] = [:]
+        for line in Self.lines(environment) {
+            guard let eq = line.firstIndex(of: "=") else { continue }
+            let key = line[..<eq].trimmingCharacters(in: .whitespaces)
+            if !key.isEmpty { result[key] = String(line[line.index(after: eq)...]) }
+        }
+        return result
+    }
+
+    var ports: [Int] {
+        reversePorts.split(whereSeparator: { $0 == " " || $0 == "," }).compactMap { Int($0) }.filter { $0 > 0 && $0 < 65536 }
+    }
+
+    /// "37.33, -122.01" → (37.33, -122.01)
+    var customCoordinate: (Double, Double)? {
+        let parts = customLocation.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count == 2, let lat = Double(parts[0]), let lon = Double(parts[1]),
+              abs(lat) <= 90, abs(lon) <= 180 else { return nil }
+        return (lat, lon)
+    }
+
+    /// Gradle variant with a capital first letter ("freeDebug" → "FreeDebug"); "Debug" by default.
+    var gradleVariant: String {
+        let trimmed = androidVariant.trimmingCharacters(in: .whitespaces)
+        guard let first = trimmed.first else { return "Debug" }
+        return first.uppercased() + trimmed.dropFirst()
+    }
+
+    /// Short suffix for the Run button when something non-default is set.
+    func runSuffix(for project: XcodeProject) -> String? {
+        var parts: [String] = []
+        switch project.kind {
+        case .flutter:
+            if flutterMode != .debug { parts.append(flutterMode.title) }
+            if !flutterFlavor.isEmpty { parts.append(flutterFlavor) }
+        case .workspace, .project:
+            if !configuration.isEmpty { parts.append(configuration) }
+        case .android:
+            if !androidVariant.isEmpty { parts.append(androidVariant) }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private static func lines(_ text: String) -> [String] {
+        text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    /// Shell-like split: spaces separate, quotes group, backslash escapes.
+    static func splitArguments(_ text: String) -> [String] {
+        var result: [String] = []
+        var current = ""
+        var quote: Character? = nil
+        var escaped = false
+        var inToken = false
+        for character in text {
+            if escaped {
+                current.append(character)
+                escaped = false
+                continue
+            }
+            if character == "\\" {
+                escaped = true
+                inToken = true
+                continue
+            }
+            if let q = quote {
+                if character == q { quote = nil } else { current.append(character) }
+                continue
+            }
+            if character == "\"" || character == "'" {
+                quote = character
+                inToken = true
+            } else if character.isWhitespace {
+                if inToken { result.append(current) }
+                current = ""
+                inToken = false
+            } else {
+                current.append(character)
+                inToken = true
+            }
+        }
+        if inToken { result.append(current) }
+        return result
+    }
+}
+
+/// Bundle / application IDs seen on the last successful run, so tools work before the next run.
+enum KnownAppIDs {
+    private static let key = "knownAppIdentifiers"
+
+    static func get(_ projectID: String) -> String? {
+        (UserDefaults.standard.dictionary(forKey: key) as? [String: String])?[projectID]
+    }
+
+    static func set(_ identifier: String, for projectID: String) {
+        var all = (UserDefaults.standard.dictionary(forKey: key) as? [String: String]) ?? [:]
+        all[projectID] = identifier
+        UserDefaults.standard.set(all, forKey: key)
     }
 }
 
@@ -185,6 +348,7 @@ enum Defaults {
     static let archivedProjects = "archivedProjects"
     static let removedProjects = "removedProjects"
     static let projectDestinations = "projectDestinations"
+    static let runOptions = "runOptions"
 }
 
 extension String {

@@ -34,7 +34,7 @@ enum MenuBarIcon {
         // (`phase` is BuildRunner.aggregatePhase: busy while any project runs.)
         let badge: String
         switch phase {
-        case .idle, .succeeded, .cancelled, .attached, .streaming: badge = "play.fill"
+        case .idle, .succeeded, .cancelled, .attached, .streaming, .finished: badge = "play.fill"
         case .failed: badge = "exclamationmark"
         default: badge = "hourglass"
         }

@@ -47,9 +47,13 @@ final class BuildRunner: ObservableObject {
     /// Sessions still building / installing / launching (not just streaming an app's logs).
     var buildingCount: Int { sessions.values.filter { $0.phase.isBuilding }.count }
 
-    func run(project: XcodeProject, scheme: String?, simulator: Simulator) {
-        let session = sessions[project.id] ?? makeSession(for: project)
-        session.run(project: project, scheme: scheme, simulator: simulator)
+    func run(project: XcodeProject, scheme: String?, simulator: Simulator, options: RunOptions) {
+        session(ensuring: project).run(project: project, scheme: scheme, simulator: simulator, options: options)
+    }
+
+    /// The project's session, created on first use (tools can run before the first Run).
+    func session(ensuring project: XcodeProject) -> RunSession {
+        sessions[project.id] ?? makeSession(for: project)
     }
 
     func stop(_ projectID: String) { sessions[projectID]?.stop() }
@@ -118,20 +122,47 @@ final class RunSession: ObservableObject {
 
     var isRunning: Bool { phase.isActive }
 
-    func run(project: XcodeProject, scheme: String?, simulator: Simulator, configuration: String = "Debug") {
+    /// The app launched by the last run, for Relaunch / Restart and the device tools.
+    @Published private(set) var lastLaunch: LaunchTarget?
+    /// Set from the log window: new runs append to the log instead of clearing it.
+    /// Turned off again when the log window closes.
+    @Published var preserveLog = false
+
+    func run(project: XcodeProject, scheme: String?, simulator: Simulator, options: RunOptions) {
+        let description = "\(project.displayName) · \(scheme ?? project.kindLabel) → \(simulator.name) (\(simulator.runtimeName))"
+        start(description: description, resetLog: true) { session in
+            try await session.perform(project: project, scheme: scheme, simulator: simulator, options: options)
+        }
+    }
+
+    /// Runs `work` as this session's job: one at a time, with the log, phases and Stop.
+    /// While an app is live (streaming), it's stopped first.
+    private func start(description: String, resetLog: Bool, work: @escaping (RunSession) async throws -> Void) {
         if phase == .streaming {
-            // Run again while the app is live: stop it (and its log stream), then start over.
             let previous = runTask
             stop()
             Task { [weak self] in
                 await previous?.value
-                self?.run(project: project, scheme: scheme, simulator: simulator, configuration: configuration)
+                self?.start(description: description, resetLog: resetLog, work: work)
             }
             return
         }
         guard !isRunning else { return }
-        beginLog()
-        runDescription = "\(project.displayName) · \(scheme ?? project.kindLabel) → \(simulator.name) (\(simulator.runtimeName))"
+        if resetLog && !preserveLog {
+            beginLog()
+        } else if resetLog {
+            // Preserve Log: keep the previous output, start a new run below a divider.
+            reopenLog()
+            warningCount = 0
+            errorCount = 0
+            let time = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+            append("")
+            append("━━━━━━━━ New run · \(time) ━━━━━━━━")
+        } else {
+            reopenLog()
+            append("")
+        }
+        runDescription = description
         startedAt = Date()
         finishedAt = nil
         phase = .building
@@ -140,7 +171,21 @@ final class RunSession: ObservableObject {
             Task { @MainActor in self?.flushPending() }
         }
         runTask = Task { [weak self] in
-            await self?.perform(project: project, scheme: scheme, simulator: simulator, configuration: configuration)
+            guard let self else { return }
+            do {
+                try await work(self)
+            } catch {
+                if error is CancellationError || Task.isCancelled {
+                    self.append("■ Stopped")
+                    self.phase = .cancelled
+                } else {
+                    self.append("✗ \(error.localizedDescription)")
+                    self.phase = .failed(error.localizedDescription)
+                }
+            }
+            self.isFlutterSession = false
+            self.statusDetail = ""
+            self.finish()
         }
     }
 
@@ -166,7 +211,7 @@ final class RunSession: ObservableObject {
         logRevision += 1
     }
 
-    // MARK: - Flutter hot reload
+    // MARK: - Flutter keys
 
     var canHotReload: Bool { phase == .attached }
 
@@ -182,38 +227,132 @@ final class RunSession: ObservableObject {
         currentProcess?.send("R")
     }
 
-    // MARK: - Pipeline
+    /// Sends one of `flutter run`'s key commands (v = DevTools, i = inspector, P = performance overlay…).
+    func sendFlutterKey(_ key: String, label: String) {
+        guard canHotReload else { return }
+        append("⌨ \(label)")
+        currentProcess?.send(key)
+    }
 
-    private func perform(project: XcodeProject, scheme: String?, simulator: Simulator, configuration: String) async {
-        append("▶ \(scheme ?? project.kindLabel) on \(simulator.name) — \(simulator.runtimeName)")
-        append("  \(project.url.path)")
+    // MARK: - Relaunch (no rebuild)
 
-        do {
-            switch project.kind {
-            case .workspace, .project:
-                guard let scheme else { throw RunError.missingScheme }
-                try await runXcode(project: project, scheme: scheme, simulator: simulator, configuration: configuration)
-            case .flutter:
-                try await runFlutter(project: project, destination: simulator)
-            case .android:
-                try await runAndroid(project: project, destination: simulator)
-            }
-        } catch {
-            if error is CancellationError || Task.isCancelled {
-                append("■ Stopped")
-                phase = .cancelled
-            } else {
-                append("✗ \(error.localizedDescription)")
-                phase = .failed(error.localizedDescription)
+    var canRelaunch: Bool {
+        guard lastLaunch != nil, !isFlutterSession else { return false }
+        return phase == .streaming || !isRunning
+    }
+
+    /// Launches the last-built app again without building (Xcode) or restarts it (Android).
+    func relaunch() {
+        guard let target = lastLaunch, canRelaunch else { return }
+        start(description: runDescription, resetLog: false) { session in
+            session.append("⟲ Relaunching \(target.appName) on \(target.destinationName)")
+            switch target.kind {
+            case .simulator, .device:
+                try await session.launchApple(target)
+            case .androidEmulator, .androidDevice:
+                try await session.launchAndroid(target)
             }
         }
-        isFlutterSession = false
-        finish()
+    }
+
+    // MARK: - Tool jobs (clean, pub get, tests…)
+
+    /// Streams a long command (e.g. `flutter clean`) into the log as this session's job.
+    func runTool(_ title: String, executable: String, arguments: [String], in directory: URL,
+                 environment: [String: String] = [:], display: String, done: String) {
+        start(description: title, resetLog: false) { session in
+            session.append("▶ \(title)")
+            session.phase = .building
+            let status = await session.stream(executable, arguments, in: directory, environment: environment,
+                                              display: display)
+            try Task.checkCancellation()
+            guard status == 0 else {
+                throw RunError.buildFailed(status: status, firstError: session.firstError)
+            }
+            session.append("✓ \(done)")
+            session.phase = .finished(done)
+        }
+    }
+
+    /// Xcode build / test / clean for the scheme, without launching anything.
+    func runXcodeTool(_ action: String, project: XcodeProject, scheme: String, destination: Simulator,
+                      options: RunOptions) {
+        let title = "\(action.capitalized) \(scheme)"
+        start(description: title, resetLog: true) { session in
+            session.append("▶ \(title) → \(destination.name)")
+            let base = await session.xcodeBaseArguments(project: project, scheme: scheme, destination: destination,
+                                                        options: options)
+            var arguments = base.arguments
+            if action != "clean" { arguments += ["-skipPackagePluginValidation", "-skipMacroValidation"] }
+            if destination.kind == .device, action != "clean" { arguments += ["-allowProvisioningUpdates"] }
+            session.phase = .building
+            let status = await session.stream(Shell.xcrunPath, arguments + [action], in: project.directory,
+                                              display: "xcrun")
+            try Task.checkCancellation()
+            guard status == 0 else {
+                throw RunError.buildFailed(status: status, firstError: session.firstError)
+            }
+            let done = action == "test" ? "Tests passed" : (action == "clean" ? "Cleaned" : "Build succeeded")
+            session.append("✓ \(done)")
+            session.phase = .finished(done)
+        }
+    }
+
+    /// A short command that doesn't interrupt a running app (appearance, permissions, push…).
+    /// Its output goes to the log; returns the output, or throws with the error.
+    @discardableResult
+    func quick(_ title: String, executable: String = Shell.xcrunPath, arguments: [String],
+               environment: [String: String] = [:], display: String = "xcrun") async throws -> String {
+        reopenLogIfIdle()
+        append("▶ \(title)")
+        append("$ \(display) " + arguments.map(Self.shellQuote).joined(separator: " "))
+        let result = try await Shell.run(executable, arguments, environment: environment)
+        let output = (result.stdout + result.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
+        for line in output.split(whereSeparator: \.isNewline) { append(String(line)) }
+        guard result.succeeded else {
+            throw ShellError.failed(command: title, status: result.status, output: output)
+        }
+        return output
+    }
+
+    // MARK: - Pipeline
+
+    private func perform(project: XcodeProject, scheme: String?, simulator: Simulator, options: RunOptions) async throws {
+        append("▶ \(scheme ?? project.kindLabel) on \(simulator.name) — \(simulator.runtimeName)")
+        append("  \(project.url.path)")
+        switch project.kind {
+        case .workspace, .project:
+            guard let scheme else { throw RunError.missingScheme }
+            try await runXcode(project: project, scheme: scheme, simulator: simulator, options: options)
+        case .flutter:
+            try await runFlutter(project: project, destination: simulator, options: options)
+        case .android:
+            try await runAndroid(project: project, destination: simulator, options: options)
+        }
     }
 
     // MARK: Xcode
 
-    private func runXcode(project: XcodeProject, scheme: String, simulator: Simulator, configuration: String) async throws {
+    /// xcodebuild arguments for the scheme, with the configuration from the options or the scheme's Run action.
+    private func xcodeBaseArguments(project: XcodeProject, scheme: String, destination: Simulator,
+                                    options: RunOptions) async -> (arguments: [String], target: String?) {
+        let container = project.url
+        let launch = await Task.detached { SchemeLaunchInfo.load(scheme: scheme, near: container) }.value
+        let override = options.configuration.trimmingCharacters(in: .whitespaces)
+        let configuration = override.isEmpty ? (launch.configuration ?? "Debug") : override
+        let source = !override.isEmpty ? " (from Run Options)"
+            : (launch.configuration == nil ? " (scheme file not found, using default)" : "")
+        append("Scheme: \(scheme) · Configuration: \(configuration)" + source
+               + (launch.target.map { " · Runs: \($0)" } ?? ""))
+        return ([
+            "xcodebuild", project.containerFlag, project.url.path,
+            "-scheme", scheme,
+            "-configuration", configuration,
+            "-destination", "id=\(destination.udid)",
+        ], launch.target)
+    }
+
+    private func runXcode(project: XcodeProject, scheme: String, simulator: Simulator, options: RunOptions) async throws {
         let udid = simulator.udid
         let isDevice = simulator.kind == .device
         // Boot the simulator in parallel with the build to save time (not needed for real devices).
@@ -221,22 +360,8 @@ final class RunSession: ObservableObject {
             try await Shell.run(Shell.xcrunPath, ["simctl", "bootstatus", udid, "-b"])
         }
 
-        // Use the configuration the scheme's Run action builds (e.g. "Debug-Staging"), like Xcode's ▶ does.
-        let container = project.url
-        let launch = await Task.detached { SchemeLaunchInfo.load(scheme: scheme, near: container) }.value
-        let buildConfiguration = launch.configuration ?? configuration
-        append("Scheme: \(scheme) · Configuration: \(buildConfiguration)"
-               + (launch.configuration == nil ? " (scheme file not found, using default)" : "")
-               + (launch.target.map { " · Runs: \($0)" } ?? ""))
-
-        let base = [
-            "xcodebuild", project.containerFlag, project.url.path,
-            "-scheme", scheme,
-            "-configuration", buildConfiguration,
-            "-destination", "id=\(udid)",
-        ]
-
-        var buildArguments = base + ["-skipPackagePluginValidation", "-skipMacroValidation"]
+        let base = await xcodeBaseArguments(project: project, scheme: scheme, destination: simulator, options: options)
+        var buildArguments = base.arguments + ["-skipPackagePluginValidation", "-skipMacroValidation"]
         if isDevice {
             // Let Xcode create/refresh provisioning profiles (automatic signing).
             buildArguments += ["-allowProvisioningUpdates"]
@@ -248,28 +373,26 @@ final class RunSession: ObservableObject {
         guard status == 0 else { throw RunError.buildFailed(status: status, firstError: firstError) }
 
         phase = .preparing
-        let product = try await locateProduct(base: base, preferredTargets: [launch.target, scheme].compactMap { $0 },
+        let product = try await locateProduct(base: base.arguments,
+                                              preferredTargets: [base.target, scheme].compactMap { $0 },
                                               in: project.directory)
         append("App: \(product.appURL.path)")
         append("Bundle ID: \(product.bundleIdentifier)")
+        KnownAppIDs.set(product.bundleIdentifier, for: projectID)
         try Task.checkCancellation()
+
+        let target = LaunchTarget(
+            kind: simulator.kind, udid: udid, serial: nil,
+            appID: product.bundleIdentifier,
+            appName: product.appURL.deletingPathExtension().lastPathComponent,
+            destinationName: simulator.name,
+            arguments: options.launchArgumentList,
+            environment: options.environmentPairs
+        )
 
         if isDevice {
             phase = .installing
             try await logged(["devicectl", "device", "install", "app", "--device", udid, product.appURL.path])
-            try Task.checkCancellation()
-
-            phase = .launching
-            try await launchWithConsole(
-                ["devicectl", "device", "process", "launch", "--console", "--terminate-existing",
-                 "--device", udid, product.bundleIdentifier],
-                fallback: ["devicectl", "device", "process", "launch", "--device", udid,
-                           "--terminate-existing", product.bundleIdentifier],
-                environment: [:],
-                appName: product.appURL.deletingPathExtension().lastPathComponent,
-                destination: simulator.name,
-                stopNote: "Stop detaches from the app; it keeps running on the device."
-            )
         } else {
             phase = .booting
             if let bootTask {
@@ -284,18 +407,53 @@ final class RunSession: ObservableObject {
 
             phase = .installing
             try await logged(["simctl", "install", udid, product.appURL.path])
-            try Task.checkCancellation()
+        }
+        try Task.checkCancellation()
+        try await launchApple(target)
+    }
 
-            phase = .launching
-            // --console-pty streams the app's stdout/stderr (print, NSLog) and passes Stop (SIGINT) to the app.
-            // OS_ACTIVITY_DT_MODE (set for the app via SIMCTL_CHILD_) also mirrors os_log / Logger output,
-            // like Xcode's console.
+    /// Launches an installed Apple app with its console attached, passing launch arguments and environment.
+    private func launchApple(_ target: LaunchTarget) async throws {
+        lastLaunch = target
+        phase = .launching
+        if !target.arguments.isEmpty {
+            append("Launch arguments: " + target.arguments.map(Self.shellQuote).joined(separator: " "))
+        }
+        if !target.environment.isEmpty {
+            append("Environment: " + target.environment.keys.sorted().joined(separator: ", "))
+        }
+
+        if target.kind == .device {
+            var environmentFlag: [String] = []
+            if !target.environment.isEmpty,
+               let json = try? JSONSerialization.data(withJSONObject: target.environment),
+               let text = String(data: json, encoding: .utf8) {
+                environmentFlag = ["--environment-variables", text]
+            }
             try await launchWithConsole(
-                ["simctl", "launch", "--console-pty", "--terminate-running-process", udid, product.bundleIdentifier],
-                fallback: ["simctl", "launch", "--terminate-running-process", udid, product.bundleIdentifier],
-                environment: ["SIMCTL_CHILD_OS_ACTIVITY_DT_MODE": "enable"],
-                appName: product.appURL.deletingPathExtension().lastPathComponent,
-                destination: simulator.name,
+                ["devicectl", "device", "process", "launch", "--console", "--terminate-existing",
+                 "--device", target.udid] + environmentFlag + [target.appID] + target.arguments,
+                fallback: ["devicectl", "device", "process", "launch", "--device", target.udid,
+                           "--terminate-existing"] + environmentFlag + [target.appID] + target.arguments,
+                environment: [:],
+                appName: target.appName,
+                destination: target.destinationName,
+                stopNote: "Stop detaches from the app; it keeps running on the device."
+            )
+        } else {
+            // --console-pty streams the app's stdout/stderr (print, NSLog) and passes Stop (SIGINT) to the app.
+            // SIMCTL_CHILD_ variables reach the app's environment; OS_ACTIVITY_DT_MODE also mirrors
+            // os_log / Logger output, like Xcode's console.
+            var environment = ["SIMCTL_CHILD_OS_ACTIVITY_DT_MODE": "enable"]
+            for (key, value) in target.environment { environment["SIMCTL_CHILD_" + key] = value }
+            try await launchWithConsole(
+                ["simctl", "launch", "--console-pty", "--terminate-running-process", target.udid, target.appID]
+                    + target.arguments,
+                fallback: ["simctl", "launch", "--terminate-running-process", target.udid, target.appID]
+                    + target.arguments,
+                environment: environment,
+                appName: target.appName,
+                destination: target.destinationName,
                 stopNote: "Stop quits the app."
             )
         }
@@ -318,7 +476,7 @@ final class RunSession: ObservableObject {
         if status != 0, unsupported.contains(where: output.contains) {
             append("This Xcode can't attach to the app's console, so live logs aren't available. Launching without them.")
             phase = .launching
-            try await logged(fallback)
+            try await logged(fallback, environment: environment)
             append("✓ Launched \(appName) on \(destination)")
             phase = .succeeded
             return
@@ -335,7 +493,7 @@ final class RunSession: ObservableObject {
 
     // MARK: Flutter
 
-    private func runFlutter(project: XcodeProject, destination: Simulator) async throws {
+    private func runFlutter(project: XcodeProject, destination: Simulator, options: RunOptions) async throws {
         guard let flutter = Shell.which("flutter") else {
             throw RunError.toolMissing("Flutter SDK not found. Make sure `flutter` is on the PATH in your shell profile (e.g. ~/.zshrc).")
         }
@@ -356,13 +514,23 @@ final class RunSession: ObservableObject {
         case .androidEmulator, .androidDevice:
             if destination.serial == nil { append("Starting emulator \(destination.name)…") }
             deviceID = try await AndroidSDK.ensureOnline(destination)
+            try await applyReversePorts(options.ports, serial: deviceID)
         }
         try Task.checkCancellation()
 
+        var arguments = ["run", "-d", deviceID, "--\(options.flutterMode.rawValue)"]
+        let flavor = options.flutterFlavor.trimmingCharacters(in: .whitespaces)
+        if !flavor.isEmpty { arguments += ["--flavor", flavor] }
+        let target = options.flutterTarget.trimmingCharacters(in: .whitespaces)
+        if !target.isEmpty { arguments += ["-t", target] }
+        arguments += options.dartDefinePairs.map { "--dart-define=\($0)" }
+        if options.flutterMode != .debug, destination.kind == .simulator {
+            append("Note: Flutter only supports debug mode on iOS simulators; use a device for \(options.flutterMode.title).")
+        }
+
         phase = .building
         isFlutterSession = true
-        let status = await stream(flutter, ["run", "-d", deviceID, "--debug"],
-                                  in: project.directory, display: "flutter", interactive: true)
+        let status = await stream(flutter, arguments, in: project.directory, display: "flutter", interactive: true)
         isFlutterSession = false
         try Task.checkCancellation()
         guard status == 0 else { throw RunError.buildFailed(status: status, firstError: firstError) }
@@ -372,7 +540,7 @@ final class RunSession: ObservableObject {
 
     // MARK: Android
 
-    private func runAndroid(project: XcodeProject, destination: Simulator) async throws {
+    private func runAndroid(project: XcodeProject, destination: Simulator, options: RunOptions) async throws {
         guard let adb = AndroidSDK.adb else { throw AndroidError.sdkNotFound }
         let module = project.androidModule ?? "app"
         let gradlew = project.url.appendingPathComponent("gradlew").path
@@ -386,26 +554,49 @@ final class RunSession: ObservableObject {
         append("Device: \(serial)")
         try Task.checkCancellation()
 
+        let task = ":\(module):install\(options.gradleVariant)"
         phase = .building
-        let status = await stream("/bin/sh", [gradlew, ":\(module):installDebug", "--console=plain"],
+        let status = await stream("/bin/sh", [gradlew, task, "--console=plain"],
                                   in: project.url, environment: ["ANDROID_SERIAL": serial],
-                                  display: "./gradlew :\(module):installDebug --console=plain", showArguments: false)
+                                  display: "./gradlew \(task) --console=plain", showArguments: false)
         try Task.checkCancellation()
         guard status == 0 else { throw RunError.buildFailed(status: status, firstError: firstError) }
 
-        phase = .launching
-        let applicationID = try Self.androidApplicationID(project: project, module: module)
+        try await applyReversePorts(options.ports, serial: serial)
+
+        let applicationID = try Self.androidApplicationID(project: project, module: module,
+                                                          variant: options.androidVariant)
         append("Application ID: \(applicationID)")
-        _ = try? await Shell.run(adb, ["-s", serial, "shell", "am", "force-stop", applicationID])
-        try await logged(["-s", serial, "shell", "monkey", "-p", applicationID,
+        KnownAppIDs.set(applicationID, for: projectID)
+        try await launchAndroid(LaunchTarget(
+            kind: destination.kind, udid: destination.udid, serial: serial, appID: applicationID,
+            appName: applicationID, destinationName: destination.name
+        ))
+    }
+
+    /// `adb reverse tcp:N tcp:N` so the app on the device can reach servers on this Mac.
+    private func applyReversePorts(_ ports: [Int], serial: String) async throws {
+        guard !ports.isEmpty, let adb = AndroidSDK.adb else { return }
+        for port in ports {
+            try await logged(["-s", serial, "reverse", "tcp:\(port)", "tcp:\(port)"], executable: adb, display: "adb")
+        }
+    }
+
+    /// (Re)starts an installed Android app and streams its logcat until Stop.
+    private func launchAndroid(_ target: LaunchTarget) async throws {
+        guard let adb = AndroidSDK.adb, let serial = target.serial else { throw AndroidError.sdkNotFound }
+        lastLaunch = target
+        phase = .launching
+        _ = try? await Shell.run(adb, ["-s", serial, "shell", "am", "force-stop", target.appID])
+        try await logged(["-s", serial, "shell", "monkey", "-p", target.appID,
                           "-c", "android.intent.category.LAUNCHER", "1"], executable: adb, display: "adb")
-        append("✓ Launched \(applicationID) on \(destination.name)")
+        append("✓ Launched \(target.appID) on \(target.destinationName)")
 
         // Live logs: logcat filtered to the app's process.
         var pid: String?
         for _ in 0..<10 where pid == nil {
             try await Task.sleep(nanoseconds: 300_000_000)
-            let result = try? await Shell.run(adb, ["-s", serial, "shell", "pidof", "-s", applicationID])
+            let result = try? await Shell.run(adb, ["-s", serial, "shell", "pidof", "-s", target.appID])
             let value = result?.stdout.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !value.isEmpty, Int(value) != nil { pid = value }
         }
@@ -419,9 +610,9 @@ final class RunSession: ObservableObject {
         statusDetail = "Live logs · Stop quits the app."
         append("Live logs (logcat, pid \(pid)). Stop quits the app.")
         _ = await stream(adb, ["-s", serial, "logcat", "-v", "time", "--pid=\(pid)"],
-                         in: project.url, display: "adb")
+                         in: FileManager.default.temporaryDirectory, display: "adb")
         if Task.isCancelled {
-            _ = try? await Shell.run(adb, ["-s", serial, "shell", "am", "force-stop", applicationID])
+            _ = try? await Shell.run(adb, ["-s", serial, "shell", "am", "force-stop", target.appID])
             throw CancellationError()
         }
         append("■ Log stream ended")
@@ -430,8 +621,8 @@ final class RunSession: ObservableObject {
     }
 
     /// Reads the applicationId from the build output (AGP 4.1+), falling back to the module's build script.
-    nonisolated static func androidApplicationID(project: XcodeProject, module: String) throws -> String {
-        let metadata = project.url.appendingPathComponent("\(module)/build/outputs/apk/debug/output-metadata.json")
+    nonisolated static func androidApplicationID(project: XcodeProject, module: String, variant: String = "") throws -> String {
+        let metadata = project.url.appendingPathComponent("\(module)/build/outputs/apk/\(apkOutputPath(variant))/output-metadata.json")
         if let data = try? Data(contentsOf: metadata),
            let object = try? JSONSerialization.jsonObject(with: data),
            let json = object as? [String: Any],
@@ -445,6 +636,19 @@ final class RunSession: ObservableObject {
             if let id = firstMatch(#"namespace\s*=?\s*["']([^"']+)["']"#, in: text) { return id }
         }
         throw RunError.toolMissing("Couldn't find the applicationId for \(project.name).")
+    }
+
+    /// "" → "debug"; "freeDebug" → "free/debug"; "freeStagingRelease" → "freeStaging/release".
+    nonisolated static func apkOutputPath(_ variant: String) -> String {
+        let trimmed = variant.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return "debug" }
+        // The build type is the last capitalized word.
+        guard let split = trimmed.lastIndex(where: { $0.isUppercase }), split != trimmed.startIndex else {
+            return trimmed.lowercased()
+        }
+        let flavor = trimmed[..<split]
+        let buildType = trimmed[split...].lowercased()
+        return "\(flavor)/\(buildType)"
     }
 
     nonisolated private static func firstMatch(_ pattern: String, in text: String) -> String? {
@@ -475,9 +679,10 @@ final class RunSession: ObservableObject {
     }
 
     @discardableResult
-    private func logged(_ arguments: [String], executable: String = Shell.xcrunPath, display: String = "xcrun") async throws -> ShellResult {
+    private func logged(_ arguments: [String], executable: String = Shell.xcrunPath, display: String = "xcrun",
+                        environment: [String: String] = [:]) async throws -> ShellResult {
         append("$ \(display) " + arguments.map(Self.shellQuote).joined(separator: " "))
-        let result = try await Shell.run(executable, arguments)
+        let result = try await Shell.run(executable, arguments, environment: environment)
         for line in (result.stdout + result.stderr).split(whereSeparator: \.isNewline) {
             append(String(line))
         }
@@ -556,6 +761,29 @@ final class RunSession: ObservableObject {
         try? logHandle?.close()
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         logHandle = try? FileHandle(forWritingTo: logURL)
+    }
+
+    /// Keeps the current log and appends to its file (for tools and relaunches).
+    private func reopenLog() {
+        firstError = nil
+        statusDetail = ""
+        guard logHandle == nil else { return }
+        if !FileManager.default.fileExists(atPath: logURL.path) {
+            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        }
+        logHandle = try? FileHandle(forWritingTo: logURL)
+        _ = try? logHandle?.seekToEnd()
+    }
+
+    /// Quick tools write to the log file too, even when nothing is running.
+    private func reopenLogIfIdle() {
+        if logHandle == nil {
+            if !FileManager.default.fileExists(atPath: logURL.path) {
+                FileManager.default.createFile(atPath: logURL.path, contents: nil)
+            }
+            logHandle = try? FileHandle(forWritingTo: logURL)
+            _ = try? logHandle?.seekToEnd()
+        }
     }
 
     private func finish() {
@@ -702,4 +930,18 @@ struct SchemeLaunchInfo {
         }
         return userMatch
     }
+}
+
+/// An installed app the session launched, so it can be relaunched or restarted without rebuilding.
+struct LaunchTarget: Equatable {
+    let kind: Simulator.Kind
+    let udid: String
+    /// Android: adb serial.
+    let serial: String?
+    /// Bundle identifier (Apple) or application ID (Android).
+    let appID: String
+    let appName: String
+    let destinationName: String
+    var arguments: [String] = []
+    var environment: [String: String] = [:]
 }
