@@ -4,10 +4,10 @@ A macOS menu bar app that builds and runs your **Xcode**, **Flutter** and **Andr
 
 ## Layout
 
-The popup, top to bottom:
+The popup, top to bottom. The device, project and git rows open **drill-in pages**: the popup is replaced by that row at the top with a search field (already focused) and its full list below. Click the row again (⌃) or press Esc to go back; picking an item goes back too. Closing the popup always returns to the main view.
 
-1. **Target device** of the selected project. Click the name to switch devices. The menu only lists devices that project type supports (Apple targets for Xcode, Android for Android, both for Flutter), and each project remembers its own choice. **Boot** / **Shut Down** acts on that simulator using its live state. The **Running** section in the menu shuts down any running simulator, or all of them.
-2. **Project picker.** A single collapsible row showing the selected project. Click it to expand the project list (most recently used first), then click a project to select it; the list collapses again. Rows show a run badge (⏳ building, ⚡ hot reload ready, ✓ launched, ✗ failed), because **several projects can run at the same time**.
+1. **Target device** of the selected project. Click it to open the **devices page**: a searchable list (by name or runtime) of only the devices that project type supports (Apple targets for Xcode, Android for Android, both for Flutter), grouped by runtime, with ✓ on the current one and a green dot on running simulators. Return picks the first match. Each project remembers its own choice. A **Running** section at the top shuts down any running simulator, or all of them. **Boot** / **Shut Down** on the row acts on the selected simulator using its live state.
+2. **Project picker.** The selected project. Click it to open the **projects page**: a searchable list (by name, type or path) with the most recently used first, and the **Archived** section at the bottom (archived matches always show while searching). Return picks the first match. Rows show a run badge (⏳ building, ⚡ hot reload ready, ✓ launched, ✗ failed), because **several projects can run at the same time**.
 3. **Actions** for the selected project:
    - **Run on <device>** (⌘R) or **Stop** (⌘.), plus **Hot Reload** (⌘R) and hot restart (⇧⌘R) for Flutter
    - **Show / Hide Logs**, the live build log for this project. After launch, the log keeps going with the **app's own output** (the row shows a green ⦿ and "Running · live logs"):
@@ -19,12 +19,12 @@ The popup, top to bottom:
    - **Open in Xcode / Android Studio / VS Code**, **Reveal in Finder**, **Open in Terminal**
    - **Reload Schemes** (Xcode) or **Open Log File**
    - For Xcode projects, the scheme picker sits in the Actions header.
-   - **Git** appears at the top of the section when the project is in a git repository. It's a full-width **branch row** (`⎇ develop · up to date with origin/develop · 10 changed  ›`). Click it to open a native menu to its right.
+   - **Git** appears at the top of the section when the project is in a git repository. It's a full-width **branch row** (`⎇ develop · up to date with origin/develop · 10 changed  ›`). Click it to open the **git page**.
      - While the status loads, the row shows a spinner and "Reading branch, changes and remotes…" in the same space, so nothing below it jumps. Folders outside a git repository show a dimmed "No git repository" row.
-     - **Pull** (`git pull --ff-only`, never creates a merge commit), **Push** (`git push`, or `git push -u origin <branch>` the first time) asks first: it shows "Push 3 commits to origin/main?" with the commit list, and nothing is sent until you press **Push**. **Fetch** (`git fetch --all --prune`), **New Branch from Current…** (`git switch -c`) and **Refresh Status**
-     - **Commit…** (also a **Commit N Changes…** button under the branch row whenever there are changes) opens a window: changed files with checkboxes on the left, the selected file's diff on the right, and a message box. Only the checked files are committed (⌘↩); anything else you had staged stays staged.
-     - **Local Branches ›**, a submenu where ✓ marks the current branch; pick another to switch to it
-     - **Remote Branches ›**, a submenu grouped by remote; pick one to check it out with `git switch --track`
+     - The git page has action buttons: **Pull** (`git pull --ff-only`, never creates a merge commit), **Push** (`git push`, or `git push -u origin <branch>` the first time), **Fetch** (`git fetch --all --prune`), **Commit**, **New Branch** (from the current branch, `git switch -c`) and **Refresh**.
+     - **Push asks first:** it shows "Push 3 commits to origin/main?" with the commit list, and nothing is sent until you press **Push**.
+     - **Commit** (also a **Commit N Changes…** button under the branch row whenever there are changes) opens a window: changed files with checkboxes on the left, the selected file's diff on the right, and a message box. Only the checked files are committed (⌘↩); anything else you had staged stays staged.
+     - Below the actions, a search field and the branches: **Local Branches** (✓ marks the current one; click another to switch to it) and **Remote Branches**, grouped by remote (click one to check it out with `git switch --track`).
      - **No password prompts:** git never stops to ask for a password. HTTPS uses your Keychain, SSH uses your loaded keys (`ssh-add --apple-use-keychain`), and missing credentials show an error instead of hanging.
 4. **Add Folder…** Its ⋯ menu has tracked folders, removed projects and Launch at Login.
 5. **Quit RunXcodeApp** (⌘Q).
@@ -156,6 +156,8 @@ After either one, users install or upgrade with `brew install --cask cse-ariful/
 | `SimulatorStore.swift` | `simctl` listing, polling, boot and shutdown |
 | `ProjectStore.swift` | Tracked folders, project scanning, schemes |
 | `BuildRunner.swift` | Build and run pipelines for Xcode, Flutter and Android, plus the log |
+| `PopupPages.swift` | Drill-in pages: devices and projects, with search; shared page pieces |
+| `GitViews.swift` | Git model, branch row and git page |
 | `Git.swift` | Git status, fetch/pull/push, switching and creating branches, diffs and commits |
 | `CommitWindow.swift` | Commit window: file picker, diff view, message |
 | `DeviceTools.swift` | Screenshots; opening a project in Xcode, Android Studio, VS Code or Terminal |

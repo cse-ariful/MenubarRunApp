@@ -3,12 +3,12 @@ import ServiceManagement
 import SwiftUI
 
 /// The popup, top to bottom:
-///   1. target device of the selected project (filtered to what that project type supports)
-///   2. collapsible project picker: shows the selected project; expand to pick another
-///      (most recently used first, collapsible "Archived" section)
-///   3. actions for the selected project: run/stop, hot reload, logs, screenshot, open in IDE…
-///      (several projects can run at once)
+///   1. target device of the selected project (click: devices page)
+///   2. selected project (click: projects page, searchable, most recently used first)
+///   3. git branch row (click: git page) and actions for the selected project:
+///      run/stop, hot reload, logs, screenshot, open in IDE… (several projects can run at once)
 ///   4. Add Folder (⋯ menu: folders, settings)   5. Quit
+/// Clicking row 1, 2 or the git row replaces the popup with that row on top and its searchable list below.
 struct MenuContentView: View {
     @EnvironmentObject private var simulators: SimulatorStore
     @EnvironmentObject private var projects: ProjectStore
@@ -16,48 +16,32 @@ struct MenuContentView: View {
 
     @AppStorage("showLog") private var showLog = false
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
-    @AppStorage("archivedExpanded") private var archivedExpanded = false
-    /// The project list is collapsed by default; it shows only the selected project.
-    @AppStorage("projectListExpanded") private var projectListExpanded = false
-
-    private let rowSpacing: CGFloat = 2
-
-    private let maxVisibleRows = 7
-    private let rowHeight: CGFloat = 54
+    /// A drill-in page (devices, projects, git) replacing the main content, or nil.
+    @State private var page: PopupPage? = nil
+    @StateObject private var git = GitModel()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            SimulatorRow()
-            RowDivider()
-            if projects.projects.isEmpty {
-                Text(emptyMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            if let page {
+                pageView(page)
+                    .transition(.opacity)
             } else {
-                projectPickerHeader
-                if projectListExpanded {
-                    projectList
-                        .padding(.leading, 12)
-                        .transition(.opacity)
-                }
-                if let project = projects.selectedProject {
-                    RowDivider()
-                    ActionsSection(project: project, showLog: $showLog)
-                }
+                mainContent
+                    .transition(.opacity)
             }
-            RowDivider()
-            AddFolderRow(showLog: $showLog, launchAtLogin: $launchAtLogin)
-            RowDivider()
-            QuitRow()
         }
         .padding(6)
         .frame(width: 360)
+        .environmentObject(git)
+        .onExitCommand { if page != nil { show(nil) } }
+        .task(id: projects.selectedProject?.id) { await git.load(projects.selectedProject) }
         .onAppear {
             Task { await simulators.refresh(silent: true) }
+        }
+        // Closing the popup returns to the main view next time.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            page = nil
+            git.clearTransient()
         }
         .onChange(of: launchAtLogin) { enabled in
             do {
@@ -72,11 +56,67 @@ struct MenuContentView: View {
         }
     }
 
-    /// Collapsed: the selected project. Click to expand the full list.
-    private var projectPickerHeader: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.15)) { projectListExpanded.toggle() }
-        } label: {
+    private func show(_ newPage: PopupPage?) {
+        withAnimation(.easeInOut(duration: 0.15)) { page = newPage }
+    }
+
+    @ViewBuilder
+    private func pageView(_ page: PopupPage) -> some View {
+        switch page {
+        case .devices:
+            DevicesPage { show(nil) }
+        case .projects:
+            ProjectsPage { show(nil) }
+        case .git:
+            GitPage { show(nil) }
+        }
+    }
+
+    private var mainContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SimulatorRow { show(.devices) }
+            RowDivider()
+            if projects.projects.isEmpty {
+                Text(emptyMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ProjectPickerRow { show(.projects) }
+                if let project = projects.selectedProject {
+                    RowDivider()
+                    ActionsSection(project: project, showLog: $showLog) { show(.git) }
+                }
+            }
+            RowDivider()
+            AddFolderRow(showLog: $showLog, launchAtLogin: $launchAtLogin)
+            RowDivider()
+            QuitRow()
+        }
+    }
+
+    private var emptyMessage: String {
+        if projects.folders.isEmpty {
+            return "No projects yet. Add a folder with your Xcode, Flutter or Android projects. They're detected automatically."
+        }
+        return projects.isScanning ? "Scanning folders…" : "No Xcode, Flutter or Android projects found in the tracked folders."
+    }
+}
+
+// MARK: - Row 2: Project picker
+
+/// The selected project. In the main view it opens the projects page; as the page header it closes it.
+struct ProjectPickerRow: View {
+    @EnvironmentObject private var projects: ProjectStore
+    @EnvironmentObject private var runner: BuildRunner
+    var isOpen = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
             HStack(spacing: 10) {
                 Image(systemName: projects.selectedProject?.symbolName ?? "folder")
                     .font(.title3)
@@ -86,7 +126,7 @@ struct MenuContentView: View {
                     Text(projects.selectedProject?.name ?? "Select a project")
                         .font(.body.weight(.semibold))
                         .lineLimit(1)
-                    Text(pickerSubtitle)
+                    Text(subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -100,102 +140,19 @@ struct MenuContentView: View {
                         .background(Capsule().fill(Color.green.opacity(0.2)))
                         .foregroundStyle(.green)
                 }
-                Image(systemName: "chevron.down")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.secondary)
-                    .rotationEffect(.degrees(projectListExpanded ? 180 : 0))
+                DrillChevron(isOpen: isOpen)
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .listRow()
-        .help(projectListExpanded ? "Collapse project list" : "Choose another project")
+        .help(isOpen ? "Back" : "Choose another project")
     }
 
-    private var pickerSubtitle: String {
+    private var subtitle: String {
         let count = projects.projects.count
         let kind = projects.selectedProject?.kindLabel ?? "Project"
-        return "\(kind) · \(count) project\(count == 1 ? "" : "s") · click to \(projectListExpanded ? "collapse" : "switch")"
-    }
-
-    @ViewBuilder
-    private var projectList: some View {
-        if visibleRowCount > maxVisibleRows {
-            ScrollView { projectSections }
-                .frame(height: CGFloat(maxVisibleRows) * rowHeight)
-        } else {
-            projectSections
-        }
-    }
-
-    private var visibleRowCount: Int {
-        let archived = projects.archivedProjects
-        return projects.activeProjects.count
-            + (archived.isEmpty ? 0 : 1)
-            + (archivedExpanded ? archived.count : 0)
-    }
-
-    private var projectSections: some View {
-        VStack(spacing: rowSpacing) {
-            if projects.activeProjects.isEmpty {
-                Text("All projects are archived.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            ForEach(projects.activeProjects) { project in
-                projectRow(project)
-            }
-
-            if !projects.archivedProjects.isEmpty {
-                archivedHeader
-                if archivedExpanded {
-                    ForEach(projects.archivedProjects) { project in
-                        projectRow(project)
-                    }
-                }
-            }
-        }
-    }
-
-    private func projectRow(_ project: XcodeProject) -> some View {
-        ProjectRow(project: project, isSelected: projects.selectedProjectID == project.id) {
-            // Selecting also moves it to the top (last used first) and collapses the list.
-            projects.selectedProjectID = project.id
-            withAnimation(.easeInOut(duration: 0.15)) { projectListExpanded = false }
-        }
-    }
-
-    private var archivedHeader: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.15)) { archivedExpanded.toggle() }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .bold))
-                    .rotationEffect(.degrees(archivedExpanded ? 90 : 0))
-                    .frame(width: 28)
-                Image(systemName: "archivebox")
-                Text("Archived")
-                Text("\(projects.archivedProjects.count)").foregroundStyle(.tertiary)
-                Spacer()
-            }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .listRow()
-        .help("Projects you archived (⋯ › Archive). Click to show or hide.")
-    }
-
-    private var emptyMessage: String {
-        if projects.folders.isEmpty {
-            return "No projects yet. Add a folder with your Xcode, Flutter or Android projects. They're detected automatically."
-        }
-        return projects.isScanning ? "Scanning folders…" : "No Xcode, Flutter or Android projects found in the tracked folders."
+        return "\(kind) · \(count) project\(count == 1 ? "" : "s")"
     }
 }
 
@@ -203,9 +160,12 @@ struct MenuContentView: View {
 
 /// Shows (and lets you change) the run destination of the *selected* project.
 /// The menu only lists destinations that project type supports; each project remembers its own choice.
-private struct SimulatorRow: View {
+struct SimulatorRow: View {
     @EnvironmentObject private var simulators: SimulatorStore
     @EnvironmentObject private var projects: ProjectStore
+    /// True as the devices page header (click goes back).
+    var isOpen = false
+    let open: () -> Void
 
     private var project: XcodeProject? { projects.selectedProject }
 
@@ -215,79 +175,41 @@ private struct SimulatorRow: View {
         return simulators.destination(for: project, chosen: projects.destinationID(for: project))
     }
 
-    private var targetBinding: Binding<String?> {
-        Binding(
-            get: { target?.udid },
-            set: { udid in
-                if let project { projects.setDestination(udid, for: project) }
-                simulators.selectedUDID = udid  // also the default for projects without a choice
-            }
-        )
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 10) {
-                ZStack(alignment: .bottomTrailing) {
-                    Image(systemName: deviceSymbol)
-                        .font(.title2)
-                        .foregroundStyle(.tint)
-                        .frame(width: 28, height: 28)
-                    Circle()
-                        .fill(statusColor)
-                        .frame(width: 8, height: 8)
-                        .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.5))
-                }
+                Button(action: open) {
+                    HStack(spacing: 10) {
+                        ZStack(alignment: .bottomTrailing) {
+                            Image(systemName: DeviceSymbol.name(for: target))
+                                .font(.title2)
+                                .foregroundStyle(.tint)
+                                .frame(width: 28, height: 28)
+                            Circle()
+                                .fill(statusColor)
+                                .frame(width: 8, height: 8)
+                                .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.5))
+                        }
 
-                VStack(alignment: .leading, spacing: 1) {
-                    Menu {
-                        let running = runningOthers + (target.map { $0.isBooted && !$0.isPhysical ? [$0] : [] } ?? [])
-                        if !running.isEmpty {
-                            Section("Running") {
-                                ForEach(running) { sim in
-                                    Button("Shut Down \(sim.name)") {
-                                        Task { await simulators.shutdown(sim) }
-                                    }
-                                }
-                                if running.count > 1 {
-                                    Button("Shut Down All") {
-                                        Task { await simulators.shutdownAll() }
-                                    }
-                                }
-                            }
-                            Divider()
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(target?.name ?? (project == nil ? "Select a simulator" : "No compatible device"))
+                                .font(.body.weight(.semibold))
+                                .lineLimit(1)
+                            Text(subtitle)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
                         }
-                        Picker("Simulator", selection: targetBinding) {
-                            ForEach(simulators.groups(for: project)) { group in
-                                Section(group.name) {
-                                    ForEach(group.simulators) { sim in
-                                        Text(sim.menuTitle)
-                                            .tag(String?.some(sim.udid))
-                                    }
-                                }
-                            }
-                        }
-                        .pickerStyle(.inline)
-                        .labelsHidden()
-                        Divider()
-                        Button("Refresh Devices") {
-                            Task { await simulators.refresh() }
-                        }
-                    } label: {
-                        Text(target?.name ?? (project == nil ? "Select a simulator" : "No compatible device"))
-                            .font(.body.weight(.semibold))
+                        Spacer(minLength: 4)
                     }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .help(isOpen ? "Back" : "Choose a device")
 
-                Spacer(minLength: 4)
                 powerButton
+                Button(action: open) { DrillChevron(isOpen: isOpen) }
+                    .buttonStyle(.plain)
             }
 
             if let error = simulators.lastError {
@@ -326,17 +248,6 @@ private struct SimulatorRow: View {
         return sim.isBooted ? .green : Color.secondary.opacity(0.6)
     }
 
-    private var deviceSymbol: String {
-        guard let sim = target else { return "iphone" }
-        switch sim.platform {
-        case "Android": return "candybarphone"
-        case "watchOS": return "applewatch"
-        case "tvOS": return "appletv"
-        case "visionOS": return "eyeglasses"
-        default: return sim.name.contains("iPad") ? "ipad" : "iphone"
-        }
-    }
-
     @ViewBuilder
     private var powerButton: some View {
         if let sim = target {
@@ -365,10 +276,10 @@ private struct SimulatorRow: View {
     }
 }
 
-// MARK: - Project list rows (inside the collapsible project picker)
+// MARK: - Project list rows (on the projects page)
 
 /// A compact row in the expanded project list. The whole row is a button: click to select.
-private struct ProjectRow: View {
+struct ProjectRow: View {
     let project: XcodeProject
     var isSelected = false
     let onSelect: () -> Void
@@ -442,7 +353,7 @@ private struct ProjectRow: View {
 }
 
 /// Archive / remove / open items, shared by the row's ⋯ menu and right-click menu.
-private struct ProjectMenuItems: View {
+struct ProjectMenuItems: View {
     let project: XcodeProject
     @EnvironmentObject private var projects: ProjectStore
 
@@ -460,7 +371,7 @@ private struct ProjectMenuItems: View {
 }
 
 /// Small run-state indicator for list rows (several projects can run at once).
-private struct RunStateBadge: View {
+struct RunStateBadge: View {
     let phase: RunPhase
 
     var body: some View {
@@ -488,6 +399,7 @@ private struct RunStateBadge: View {
 private struct ActionsSection: View {
     let project: XcodeProject
     @Binding var showLog: Bool
+    let openGit: () -> Void
 
     @EnvironmentObject private var simulators: SimulatorStore
     @EnvironmentObject private var projects: ProjectStore
@@ -509,8 +421,7 @@ private struct ActionsSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             // Git (branch + fetch / pull / push) sits above the actions.
-            GitPanel(project: project)
-                .id(project.id)
+            GitSummary(open: openGit)
                 .padding(.horizontal, -8)
 
             HStack(spacing: 6) {
@@ -809,7 +720,7 @@ private enum ScreenshotFix {
 }
 
 /// Success / error message with an ✕ to dismiss it. Tapping the text runs `onTap` (e.g. reveal the file).
-private struct MessageBanner: View {
+struct MessageBanner: View {
     let text: String
     let isError: Bool
     var onTap: (() -> Void)?
@@ -861,449 +772,7 @@ private struct MessageBanner: View {
     }
 }
 
-// MARK: - Git (branch row → native submenu with pull / push / fetch / new branch / branches)
-
-/// Full-width branch row. Clicking it opens a native menu to its right, like a submenu:
-/// Pull, Push, Fetch, New Branch…, Refresh, then local and remote branches.
-private struct GitPanel: View {
-    let project: XcodeProject
-
-    @State private var status: GitStatus? = nil
-    /// False until the first status read finishes; a placeholder row holds the space meanwhile.
-    @State private var loaded = false
-    @State private var busy: String? = nil
-    /// Set while the push confirmation is showing.
-    @State private var pushPreview: PushPreview? = nil
-    @State private var message: String? = nil
-    @State private var messageIsError = false
-    @State private var isCreatingBranch = false
-    @State private var newBranchName = ""
-    @State private var anchor = MenuAnchorBox()
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let status {
-                branchRow(status)
-
-                if let pushPreview {
-                    pushConfirmation(pushPreview, status: status)
-                }
-
-                if status.changes > 0, pushPreview == nil, !isCreatingBranch {
-                    commitButton(status)
-                }
-
-                if isCreatingBranch {
-                    newBranchField(status)
-                }
-
-                if let message {
-                    MessageBanner(text: message, isError: messageIsError, onDismiss: {
-                        withAnimation { self.message = nil }
-                    })
-                }
-
-                Divider()
-            } else {
-                // Same height as the branch row, so nothing jumps when the status arrives.
-                placeholderRow
-                Divider()
-            }
-        }
-        .task(id: project.id) {
-            await refresh()
-            loaded = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .gitRepositoryChanged)) { note in
-            guard let root = note.object as? URL, root == status?.root else { return }
-            message = "Committed to \(status?.branch ?? "branch")."
-            messageIsError = false
-            Task { await refresh() }
-        }
-        .onDisappear { message = nil; isCreatingBranch = false; pushPreview = nil }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
-            message = nil
-        }
-    }
-
-    // MARK: Row
-
-    /// Shown while the first status read runs, and for folders that aren't in a git repository.
-    private var placeholderRow: some View {
-        HStack(spacing: 10) {
-            Group {
-                if loaded {
-                    Image(systemName: "arrow.triangle.branch")
-                        .font(.title3)
-                        .foregroundStyle(.tertiary)
-                } else {
-                    ProgressView().controlSize(.small)
-                }
-            }
-            .frame(width: 28, height: 28)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(loaded ? "No git repository" : "Git")
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(loaded ? .secondary : .primary)
-                Text(loaded ? "This project folder isn't tracked by git." : "Reading branch, changes and remotes…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 4)
-        }
-        .listRow()
-    }
-
-    private func commitButton(_ status: GitStatus) -> some View {
-        ActionTile(
-            title: status.changes == 1 ? "Commit 1 Change…" : "Commit \(status.changes) Changes…",
-            systemImage: "checkmark.circle",
-            disabled: busy != nil
-        ) {
-            CommitWindow.show(root: status.root, branch: status.isDetached ? "detached HEAD" : status.branch)
-        }
-        .padding(.horizontal, 8)
-    }
-
-    /// Inline "Push N commits to origin/main?" with the commit list, Cancel and Push.
-    private func pushConfirmation(_ preview: PushPreview, status: GitStatus) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label(preview.title, systemImage: "arrow.up.circle.fill")
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(.primary)
-            if preview.subjects.isEmpty {
-                Text(preview.isPublish ? "No new commits; this creates the branch on the remote."
-                                       : "Nothing new to push.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(preview.subjects.prefix(5), id: \.self) { line in
-                        Text(line)
-                            .font(.caption.monospaced())
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                    if preview.count > 5 {
-                        Text("and \(preview.count - 5) more")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            HStack {
-                Spacer()
-                Button("Cancel") { withAnimation { pushPreview = nil } }
-                    .controlSize(.small)
-                    .keyboardShortcut(.cancelAction)
-                Button("Push") {
-                    pushPreview = nil
-                    perform("Pushing…", success: "Pushed \(status.branch) to \(preview.target).") {
-                        try await Git.push(status)
-                    }
-                }
-                .controlSize(.small)
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.1)))
-        .padding(.horizontal, 8)
-    }
-
-    /// Loads the outgoing commits, then shows the confirmation.
-    private func confirmPush(_ status: GitStatus) {
-        guard busy == nil else { return }
-        busy = "Checking what to push…"
-        message = nil
-        isCreatingBranch = false
-        Task {
-            let outgoing = await Git.outgoing(status)
-            busy = nil
-            if outgoing.count == 0 && status.upstream != nil {
-                message = "Nothing to push: \(status.branch) is up to date with \(status.upstream!)."
-                messageIsError = false
-                return
-            }
-            withAnimation {
-                pushPreview = PushPreview(target: Git.pushTarget(status), count: outgoing.count,
-                                          subjects: outgoing.subjects, isPublish: status.upstream == nil)
-            }
-        }
-    }
-
-    private func branchRow(_ status: GitStatus) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: "arrow.triangle.branch")
-                .font(.title3)
-                .foregroundStyle(.tint)
-                .frame(width: 28, height: 28)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(status.isDetached ? "detached HEAD" : status.branch)
-                    .font(.body.weight(.semibold))
-                    .lineLimit(1)
-                Text(busy ?? syncSummary(status))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            Spacer(minLength: 4)
-            if busy != nil {
-                ProgressView().controlSize(.small)
-            }
-            Image(systemName: "chevron.right")
-                .font(.caption.weight(.bold))
-                .foregroundStyle(.secondary)
-        }
-        .contentShape(Rectangle())
-        .listRow()
-        .background(MenuAnchor(box: anchor))
-        .onTapGesture { openMenu() }
-        .help("Git: pull, push, fetch, branches")
-    }
-
-    private func newBranchField(_ status: GitStatus) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                TextField("new-branch-name", text: $newBranchName)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.callout)
-                    .onSubmit { createBranch(from: status) }
-                Button("Create") { createBranch(from: status) }
-                    .controlSize(.small)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(newBranchName.trimmingCharacters(in: .whitespaces).isEmpty || busy != nil)
-                Button {
-                    isCreatingBranch = false
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.borderless)
-                .help("Cancel")
-            }
-            Text("Creates the branch from \(status.isDetached ? "HEAD" : status.branch) and switches to it.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 8)
-    }
-
-    // MARK: Menu
-
-    /// Pops up the git menu to the right of the row, like a submenu (on click only).
-    private func openMenu() {
-        guard let status, busy == nil, let view = anchor.view else { return }
-        let menu = buildMenu(status)
-        let point = NSPoint(x: view.bounds.maxX + 2, y: view.isFlipped ? view.bounds.minY : view.bounds.maxY)
-        DispatchQueue.main.async {
-            _ = menu.popUp(positioning: nil, at: point, in: view)
-        }
-    }
-
-    private func buildMenu(_ status: GitStatus) -> NSMenu {
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-
-        menu.addItem(ClosureMenuItem(
-            title: status.behind > 0 ? "Pull  ↓\(status.behind)" : "Pull",
-            symbol: "arrow.down.to.line",
-            enabled: status.upstream != nil && !status.isDetached
-        ) { perform("Pulling…", success: "Pulled \(status.branch).") { try await Git.pull(status) } })
-
-        menu.addItem(ClosureMenuItem(
-            title: status.ahead > 0 ? "Push  ↑\(status.ahead)" : (status.upstream == nil ? "Push (set upstream)" : "Push"),
-            symbol: "arrow.up.to.line",
-            enabled: !status.isDetached
-        ) { confirmPush(status) })
-
-        menu.addItem(ClosureMenuItem(
-            title: status.changes > 0 ? "Commit \(status.changes) Change\(status.changes == 1 ? "" : "s")…" : "Commit…",
-            symbol: "checkmark.circle",
-            enabled: status.changes > 0
-        ) { CommitWindow.show(root: status.root, branch: status.isDetached ? "detached HEAD" : status.branch) })
-
-        menu.addItem(ClosureMenuItem(title: "Fetch", symbol: "arrow.down.circle") {
-            perform("Fetching…", success: "Fetched.") { try await Git.fetch(status) }
-        })
-
-        menu.addItem(ClosureMenuItem(
-            title: "New Branch from Current…",
-            symbol: "plus"
-        ) {
-            newBranchName = ""
-            pushPreview = nil
-            withAnimation { isCreatingBranch = true }
-        })
-
-        menu.addItem(ClosureMenuItem(title: "Refresh Status", symbol: "arrow.clockwise") {
-            guard busy == nil else { return }
-            busy = "Reading branch, changes and remotes…"
-            Task {
-                await refresh()
-                busy = nil
-            }
-        })
-
-        menu.addItem(.separator())
-
-        // Local Branches ›  (✓ = current; pick one to switch)
-        let local = NSMenu()
-        local.autoenablesItems = false
-        for branch in status.localBranches {
-            let isCurrent = branch == status.branch
-            let item = ClosureMenuItem(title: branch, symbol: nil, enabled: !isCurrent) {
-                perform("Switching…", success: "Switched to \(branch).") { try await Git.switchTo(branch, in: status) }
-            }
-            item.state = isCurrent ? .on : .off
-            local.addItem(item)
-        }
-        menu.addItem(Self.submenuItem("Local Branches", symbol: "arrow.triangle.branch", submenu: local))
-
-        // Remote Branches ›  (grouped by remote; pick one to check it out locally)
-        let remote = NSMenu()
-        remote.autoenablesItems = false
-        if status.remoteBranches.isEmpty {
-            let none = NSMenuItem(title: "No other remote branches", action: nil, keyEquivalent: "")
-            none.isEnabled = false
-            remote.addItem(none)
-        } else {
-            let grouped = Dictionary(grouping: status.remoteBranches) { String($0.split(separator: "/").first ?? "") }
-            for (index, remoteName) in grouped.keys.sorted().enumerated() {
-                if index > 0 { remote.addItem(.separator()) }
-                if grouped.count > 1 { remote.addItem(Self.header(remoteName)) }
-                for name in grouped[remoteName] ?? [] {
-                    remote.addItem(ClosureMenuItem(title: name, symbol: nil) {
-                        perform("Checking out…", success: "Switched to \(name).") {
-                            try await Git.checkoutRemote(name, in: status)
-                        }
-                    })
-                }
-            }
-        }
-        menu.addItem(Self.submenuItem("Remote Branches", symbol: "network", submenu: remote))
-        return menu
-    }
-
-    private static func submenuItem(_ title: String, symbol: String, submenu: NSMenu) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-        item.submenu = submenu
-        return item
-    }
-
-    private static func header(_ title: String) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.isEnabled = false
-        item.attributedTitle = NSAttributedString(string: title, attributes: [
-            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold),
-            .foregroundColor: NSColor.secondaryLabelColor,
-        ])
-        return item
-    }
-
-    // MARK: Helpers
-
-    private func syncSummary(_ status: GitStatus) -> String {
-        var parts: [String] = []
-        if let upstream = status.upstream {
-            parts.append(status.ahead == 0 && status.behind == 0 ? "up to date with \(upstream)" : "↑\(status.ahead) ↓\(status.behind)")
-        } else if !status.isDetached {
-            parts.append("not pushed yet")
-        }
-        if status.changes > 0 { parts.append("\(status.changes) changed") }
-        return parts.joined(separator: " · ")
-    }
-
-    private func createBranch(from status: GitStatus) {
-        let name = newBranchName
-        perform("Creating branch…", success: "Created and switched to \(name.trimmingCharacters(in: .whitespaces)).") {
-            try await Git.createBranch(name, in: status)
-        }
-        isCreatingBranch = false
-    }
-
-    private func perform(_ label: String, success: String, _ operation: @escaping () async throws -> Void) {
-        guard busy == nil else { return }
-        busy = label
-        message = nil
-        Task {
-            do {
-                try await operation()
-                message = success
-                messageIsError = false
-            } catch {
-                message = error.localizedDescription
-                messageIsError = true
-            }
-            busy = nil
-            await refresh()
-        }
-    }
-
-    private func refresh() async {
-        status = await Git.status(for: project.directory)
-    }
-}
-
-/// What a push would send, for the confirmation.
-private struct PushPreview: Equatable {
-    let target: String
-    let count: Int
-    let subjects: [String]
-    /// The branch has no upstream yet; the push creates it.
-    let isPublish: Bool
-
-    var title: String {
-        let commits = count == 1 ? "1 commit" : "\(count) commits"
-        return isPublish ? "Publish branch to \(target)?" + (count > 0 ? " (\(commits))" : "")
-                         : "Push \(commits) to \(target)?"
-    }
-}
-
-/// Holds the AppKit view behind a SwiftUI row so a native NSMenu can be popped up next to it.
-private final class MenuAnchorBox {
-    weak var view: NSView?
-}
-
-private struct MenuAnchor: NSViewRepresentable {
-    let box: MenuAnchorBox
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        box.view = view
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        box.view = nsView
-    }
-}
-
-/// NSMenuItem that runs a closure.
-private final class ClosureMenuItem: NSMenuItem {
-    private let handler: () -> Void
-
-    init(title: String, symbol: String?, enabled: Bool = true, handler: @escaping () -> Void) {
-        self.handler = handler
-        super.init(title: title, action: #selector(fire), keyEquivalent: "")
-        target = self
-        isEnabled = enabled
-        if let symbol {
-            image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-        }
-    }
-
-    required init(coder: NSCoder) {
-        fatalError("init(coder:) is not supported")
-    }
-
-    @objc private func fire() { handler() }
-}
-
-private struct ActionTile: View {
+struct ActionTile: View {
     let title: String
     let systemImage: String
     var disabled = false
@@ -1495,13 +964,14 @@ private struct LogPanel: View {
 
 // MARK: - Shared pieces
 
-private struct ListRowStyle: ViewModifier {
+struct ListRowStyle: ViewModifier {
+    var verticalPadding: CGFloat = 7
     @State private var hovering = false
 
     func body(content: Content) -> some View {
         content
             .padding(.horizontal, 8)
-            .padding(.vertical, 7)
+            .padding(.vertical, verticalPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 6)
@@ -1512,8 +982,10 @@ private struct ListRowStyle: ViewModifier {
     }
 }
 
-private extension View {
+extension View {
     func listRow() -> some View { modifier(ListRowStyle()) }
+    /// Tighter rows for long lists on drill-in pages.
+    func compactListRow() -> some View { modifier(ListRowStyle(verticalPadding: 4)) }
 }
 
 // MARK: - Last row: Quit
