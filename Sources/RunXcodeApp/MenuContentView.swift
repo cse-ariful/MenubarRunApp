@@ -929,10 +929,10 @@ private struct GitPanel: View {
             }
             guard !suppressHover else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                if hovering, !suppressHover, busy == nil { openMenu() }
+                if hovering, !suppressHover, busy == nil { openMenu(fromHover: true) }
             }
         }
-        .onTapGesture { openMenu() }
+        .onTapGesture { openMenu(fromHover: false) }
         .help("Git: pull, push, fetch, branches")
     }
 
@@ -964,14 +964,18 @@ private struct GitPanel: View {
 
     // MARK: Menu
 
-    private func openMenu() {
+    /// Pops up the git menu to the right of the row, like a submenu. When opened by hovering,
+    /// it closes again once the pointer has left both the row and every open (sub)menu.
+    private func openMenu(fromHover: Bool) {
         guard let status, busy == nil, let view = anchor.view else { return }
         suppressHover = true
         let menu = buildMenu(status)
-        // Show it to the right of the row, top-aligned, like a submenu.
         let point = NSPoint(x: view.bounds.maxX + 2, y: view.isFlipped ? view.bounds.minY : view.bounds.maxY)
         DispatchQueue.main.async {
-            _ = menu.popUp(positioning: nil, at: point, in: view)
+            let watcher = fromHover ? HoverAwayWatcher(menu: menu, anchor: view) : nil
+            watcher?.start()
+            _ = menu.popUp(positioning: nil, at: point, in: view)  // returns when the menu closes
+            watcher?.stop()
         }
     }
 
@@ -1008,28 +1012,50 @@ private struct GitPanel: View {
         })
 
         menu.addItem(.separator())
-        menu.addItem(Self.header("Local Branches"))
+
+        // Local Branches ›  (✓ = current; pick one to switch)
+        let local = NSMenu()
+        local.autoenablesItems = false
         for branch in status.localBranches {
             let isCurrent = branch == status.branch
             let item = ClosureMenuItem(title: branch, symbol: nil, enabled: !isCurrent) {
                 perform("Switching…", success: "Switched to \(branch).") { try await Git.switchTo(branch, in: status) }
             }
             item.state = isCurrent ? .on : .off
-            menu.addItem(item)
+            local.addItem(item)
         }
+        menu.addItem(Self.submenuItem("Local Branches", symbol: "arrow.triangle.branch", submenu: local))
 
-        if !status.remoteBranches.isEmpty {
-            menu.addItem(.separator())
-            menu.addItem(Self.header("Remote Branches"))
-            for remote in status.remoteBranches {
-                menu.addItem(ClosureMenuItem(title: remote, symbol: nil) {
-                    perform("Checking out…", success: "Switched to \(remote).") {
-                        try await Git.checkoutRemote(remote, in: status)
-                    }
-                })
+        // Remote Branches ›  (grouped by remote; pick one to check it out locally)
+        let remote = NSMenu()
+        remote.autoenablesItems = false
+        if status.remoteBranches.isEmpty {
+            let none = NSMenuItem(title: "No other remote branches", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            remote.addItem(none)
+        } else {
+            let grouped = Dictionary(grouping: status.remoteBranches) { String($0.split(separator: "/").first ?? "") }
+            for (index, remoteName) in grouped.keys.sorted().enumerated() {
+                if index > 0 { remote.addItem(.separator()) }
+                if grouped.count > 1 { remote.addItem(Self.header(remoteName)) }
+                for name in grouped[remoteName] ?? [] {
+                    remote.addItem(ClosureMenuItem(title: name, symbol: nil) {
+                        perform("Checking out…", success: "Switched to \(name).") {
+                            try await Git.checkoutRemote(name, in: status)
+                        }
+                    })
+                }
             }
         }
+        menu.addItem(Self.submenuItem("Remote Branches", symbol: "network", submenu: remote))
         return menu
+    }
+
+    private static func submenuItem(_ title: String, symbol: String, submenu: NSMenu) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        item.submenu = submenu
+        return item
     }
 
     private static func header(_ title: String) -> NSMenuItem {
@@ -1083,6 +1109,57 @@ private struct GitPanel: View {
 
     private func refresh() async {
         status = await Git.status(for: project.directory)
+    }
+}
+
+/// While a hover-opened menu is showing, polls the pointer and closes the menu once it has been
+/// outside the row and all open menu windows (including submenus) for about half a second.
+/// The timer runs in `.common` modes so it keeps firing during menu tracking.
+private final class HoverAwayWatcher {
+    private let menu: NSMenu
+    private weak var anchor: NSView?
+    private var timer: Timer?
+    private var outsideTicks = 0
+
+    init(menu: NSMenu, anchor: NSView) {
+        self.menu = menu
+        self.anchor = anchor
+    }
+
+    func start() {
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func tick() {
+        let mouse = NSEvent.mouseLocation
+        var safe: [NSRect] = []
+        if let anchor, let window = anchor.window {
+            safe.append(window.convertToScreen(anchor.convert(anchor.bounds, to: nil)).insetBy(dx: -4, dy: -4))
+        }
+        // Visible menu windows (the menu and any open submenus).
+        for window in NSApp.windows where window.isVisible && window.level.rawValue >= NSWindow.Level.popUpMenu.rawValue {
+            safe.append(window.frame.insetBy(dx: -6, dy: -6))
+        }
+        // Corridor between the row and the menu so moving across the small gap doesn't close it.
+        if safe.count >= 2 {
+            safe.append(safe[0].union(safe[1]))
+        }
+        if safe.contains(where: { $0.contains(mouse) }) {
+            outsideTicks = 0
+        } else {
+            outsideTicks += 1
+            if outsideTicks >= 5 {  // ~0.5 s outside
+                stop()
+                menu.cancelTracking()
+            }
+        }
     }
 }
 

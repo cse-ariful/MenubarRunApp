@@ -15,9 +15,10 @@ The popup, top to bottom:
    - **Open in Xcode / Android Studio / VS Code**, **Reveal in Finder**, **Open in Terminal**
    - **Reload Schemes** (Xcode) or **Open Log File**
    - For Xcode projects, the scheme picker sits in the Actions header.
-   - **Git** appears at the top of the section when the project is in a git repository. It's a full-width **branch row** (`⎇ develop · up to date with origin/develop · 10 changed  ›`). Hover over it or click it to open a menu to its right, like a submenu:
+   - **Git** appears at the top of the section when the project is in a git repository. It's a full-width **branch row** (`⎇ develop · up to date with origin/develop · 10 changed  ›`). Hover over it or click it to open a native menu to its right. A menu opened by hovering closes again when the pointer moves away from both the row and the menu.
      - **Pull** (`git pull --ff-only`, never creates a merge commit), **Push** (`git push`, or `git push -u origin <branch>` the first time), **Fetch** (`git fetch --all --prune`), **New Branch from <current>…** (`git switch -c`) and **Refresh Status**
-     - **Local branches** (✓ marks the current one; pick one to switch) and **remote branches** (pick one to check it out with `git switch --track`)
+     - **Local Branches ›**, a submenu where ✓ marks the current branch; pick another to switch to it
+     - **Remote Branches ›**, a submenu grouped by remote; pick one to check it out with `git switch --track`
      - **No password prompts:** git never stops to ask for a password. HTTPS uses your Keychain, SSH uses your loaded keys (`ssh-add --apple-use-keychain`), and missing credentials show an error instead of hanging.
 4. **Add Folder…** Its ⋯ menu has tracked folders, removed projects and Launch at Login.
 5. **Quit RunXcodeApp** (⌘Q).
