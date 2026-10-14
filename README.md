@@ -15,8 +15,8 @@ The popup, top to bottom:
    - **Open in Xcode / Android Studio / VS Code**, **Reveal in Finder**, **Open in Terminal**
    - **Reload Schemes** (Xcode) or **Open Log File**
    - For Xcode projects, the scheme picker sits in the Actions header.
-   - **Git** appears when the project is in a git repository:
-     - **Status:** the current branch, ↑ commits to push, ↓ commits to pull, and the number of changed files.
+   - **Git** appears at the top of the section when the project is in a git repository:
+     - **Status:** a single row with the branch menu, ↑ commits to push, ↓ commits to pull, the number of changed files, and a refresh button.
      - **Branch menu:** switch to any local branch, check out a remote branch (`git switch --track`), or **New Branch from <current>…** (`git switch -c`).
      - **Fetch** (`git fetch --all --prune`), **Pull** (`git pull --ff-only`, so it never creates a merge commit) and **Push** (`git push`, or `git push -u origin <branch>` the first time).
      - **No password prompts:** git never stops to ask for a password. HTTPS uses your Keychain, SSH uses your loaded keys (`ssh-add --apple-use-keychain`), and missing credentials show an error instead of hanging.

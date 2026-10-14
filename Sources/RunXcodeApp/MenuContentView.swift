@@ -506,6 +506,10 @@ private struct ActionsSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            // Git (branch + fetch / pull / push) sits above the actions.
+            GitPanel(project: project)
+                .id(project.id)
+
             HStack(spacing: 6) {
                 SectionHeader(title: "Actions", systemImage: "bolt.horizontal")
                 Spacer()
@@ -573,9 +577,6 @@ private struct ActionsSection: View {
                     }
                 )
             }
-
-            GitPanel(project: project)
-                .id(project.id)
 
             if showLog {
                 LogPanel()
@@ -857,34 +858,27 @@ private struct GitPanel: View {
     @State private var newBranchName = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 10) {
             if let status {
-                Divider().padding(.vertical, 2)
-
-                HStack(spacing: 6) {
-                    SectionHeader(title: "Git", systemImage: "arrow.triangle.branch")
-                    Spacer()
-                    if let busy {
-                        ProgressView().controlSize(.mini)
-                        Text(busy).font(.caption).foregroundStyle(.secondary)
-                    }
-                    Button {
-                        Task { await refresh() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(busy != nil)
-                    .help("Refresh git status")
-                }
-
                 HStack(spacing: 8) {
                     branchMenu(status)
-                    Text(syncSummary(status))
+                    Text(busy ?? syncSummary(status))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .truncationMode(.tail)
                     Spacer(minLength: 0)
+                    if busy != nil {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Button {
+                            Task { await refresh() }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Refresh git status")
+                    }
                 }
 
                 HStack(spacing: 6) {
@@ -933,6 +927,8 @@ private struct GitPanel: View {
                         withAnimation { self.message = nil }
                     })
                 }
+
+                Divider()
             } else {
                 // Not a git repository (or not loaded yet): show nothing.
                 Color.clear.frame(height: 0)
