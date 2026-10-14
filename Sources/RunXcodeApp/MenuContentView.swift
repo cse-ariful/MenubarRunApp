@@ -496,6 +496,8 @@ private struct ActionsSection: View {
     /// Asks before installing the iPhone screenshot helper or starting its tunnel.
     @State private var screenshotPrompt: ScreenshotPrompt? = nil
     @State private var isInstallingHelper = false
+    /// One-click fix offered on the current error message (Install / Open Terminal / Open Settings…).
+    @State private var messageAction: ScreenshotPrompt? = nil
 
     private var scheme: String? { projects.selectedScheme(for: project) }
     private var session: RunSession? { runner.session(for: project.id) }
@@ -577,7 +579,14 @@ private struct ActionsSection: View {
                     text: screenshotMessage,
                     isError: lastScreenshot == nil,
                     onTap: revealScreenshot,
-                    onDismiss: { withAnimation { self.screenshotMessage = nil } }
+                    actionTitle: messageAction?.actionTitle,
+                    action: messageFix,
+                    onDismiss: {
+                        withAnimation {
+                            self.screenshotMessage = nil
+                            self.messageAction = nil
+                        }
+                    }
                 )
             }
 
@@ -594,6 +603,11 @@ private struct ActionsSection: View {
         }
     }
 
+    private var messageFix: (() -> Void)? {
+        guard let fix = messageAction else { return nil }
+        return { confirm(fix) }
+    }
+
     private var revealScreenshot: (() -> Void)? {
         guard let url = lastScreenshot else { return nil }
         return { NSWorkspace.shared.activateFileViewerSelecting([url]) }
@@ -603,6 +617,7 @@ private struct ActionsSection: View {
         screenshotMessage = nil
         lastScreenshot = nil
         screenshotPrompt = nil
+        messageAction = nil
     }
 
     // MARK: Install / tunnel prompt
@@ -611,7 +626,7 @@ private struct ActionsSection: View {
     private func promptCard(_ prompt: ScreenshotPrompt) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 6) {
-                Image(systemName: prompt == .installHelper ? "shippingbox" : "lock.shield")
+                Image(systemName: prompt == .startTunnel ? "lock.shield" : "shippingbox")
                     .foregroundStyle(.tint)
                 Text(prompt.message)
                     .font(.caption)
@@ -643,7 +658,16 @@ private struct ActionsSection: View {
 
     private func confirm(_ prompt: ScreenshotPrompt) {
         screenshotPrompt = nil
+        messageAction = nil
         switch prompt {
+        case .openDesktopPrivacy:
+            screenshotMessage = nil
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders") {
+                NSWorkspace.shared.open(url)
+            }
+        case .getHomebrew:
+            screenshotMessage = nil
+            if let url = URL(string: "https://brew.sh") { NSWorkspace.shared.open(url) }
         case .installHelper:
             isInstallingHelper = true
             screenshotMessage = nil
@@ -656,11 +680,14 @@ private struct ActionsSection: View {
                     isInstallingHelper = false
                     lastScreenshot = nil
                     screenshotMessage = "Install failed: \(error.localizedDescription)"
+                    // Offer the next step: get Homebrew if it's missing, otherwise retry the install.
+                    messageAction = DeviceTools.brewPath == nil ? .getHomebrew : .installHelper
                 }
             }
         case .startTunnel:
             do {
                 try DeviceTools.startTunnelInTerminal()
+                messageAction = nil
                 lastScreenshot = nil
                 screenshotMessage = "Enter your Mac password in the Terminal window and keep it open, then click Screenshot again."
             } catch {
@@ -744,6 +771,7 @@ private struct ActionsSection: View {
         guard let destination else { return }
         screenshotMessage = nil
         screenshotPrompt = nil
+        messageAction = nil
 
         // Physical iPhone: offer to install the helper tool if it's missing.
         if destination.kind == .device, !DeviceTools.hasAppleDeviceHelper {
@@ -764,6 +792,14 @@ private struct ActionsSection: View {
                 DeviceTools.copyImage(at: url)
                 lastScreenshot = url
                 screenshotMessage = "Saved to Desktop and copied. Click to reveal."
+            } catch let error as ScreenshotError {
+                lastScreenshot = nil
+                screenshotMessage = error.localizedDescription
+                switch error {
+                case .helperMissing: messageAction = .installHelper
+                case .tunnelNotRunning: messageAction = .startTunnel
+                case .desktopPermission: messageAction = .openDesktopPrivacy
+                }
             } catch {
                 lastScreenshot = nil
                 screenshotMessage = error.localizedDescription
@@ -844,6 +880,8 @@ private struct ActionsSection: View {
 private enum ScreenshotPrompt {
     case installHelper
     case startTunnel
+    case openDesktopPrivacy
+    case getHomebrew
 
     var message: String {
         switch self {
@@ -855,6 +893,10 @@ private enum ScreenshotPrompt {
             return "iOS 17 and later need a device tunnel running for screenshots, including over Wi-Fi. "
                 + "It needs your admin password, so it opens in Terminal "
                 + "(`sudo pymobiledevice3 remote tunneld`). Keep that window open while you take screenshots."
+        case .openDesktopPrivacy:
+            return "Allow RunXcodeApp to access the Desktop folder in System Settings › Privacy & Security › Files and Folders."
+        case .getHomebrew:
+            return "Installing pymobiledevice3 needs Homebrew. Install it from brew.sh, then try again."
         }
     }
 
@@ -862,6 +904,8 @@ private enum ScreenshotPrompt {
         switch self {
         case .installHelper: return "Install"
         case .startTunnel: return "Open Terminal"
+        case .openDesktopPrivacy: return "Open Privacy Settings"
+        case .getHomebrew: return "Get Homebrew"
         }
     }
 }
@@ -871,9 +915,31 @@ private struct MessageBanner: View {
     let text: String
     let isError: Bool
     var onTap: (() -> Void)?
+    /// Optional one-click fix shown under the message (e.g. "Install").
+    var actionTitle: String? = nil
+    var action: (() -> Void)? = nil
     let onDismiss: () -> Void
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            messageRow
+            if let actionTitle, let action {
+                HStack {
+                    Spacer()
+                    Button(actionTitle, action: action)
+                        .controlSize(.small)
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill((isError ? Color.red : Color.green).opacity(0.08))
+        )
+    }
+
+    private var messageRow: some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                 .foregroundStyle(isError ? Color.red : Color.green)
@@ -894,11 +960,6 @@ private struct MessageBanner: View {
             .buttonStyle(.plain)
             .help("Dismiss")
         }
-        .padding(8)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill((isError ? Color.red : Color.green).opacity(0.08))
-        )
     }
 }
 

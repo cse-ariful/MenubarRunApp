@@ -1,6 +1,28 @@
 import AppKit
 import Foundation
 
+/// Screenshot failures the UI can offer a one-click fix for.
+enum ScreenshotError: LocalizedError {
+    /// No tool that can capture a physical iPhone is installed (fix: install pymobiledevice3).
+    case helperMissing
+    /// pymobiledevice3 couldn't reach the device; on iOS 17+ the tunnel daemon must run (fix: open Terminal).
+    case tunnelNotRunning(details: String)
+    /// macOS blocked writing to the Desktop (fix: allow it in Privacy & Security).
+    case desktopPermission
+
+    var errorDescription: String? {
+        switch self {
+        case .helperMissing:
+            return "Screenshots of a physical iPhone need pymobiledevice3, a free tool (Apple doesn't ship one)."
+        case let .tunnelNotRunning(details):
+            return "Couldn't reach the iPhone. iOS 17+ needs the device tunnel running (sudo pymobiledevice3 remote tunneld)."
+                + (details.isEmpty ? "" : " Details: \(details)")
+        case .desktopPermission:
+            return "macOS didn't allow RunXcodeApp to save to the Desktop."
+        }
+    }
+}
+
 /// Per-project helper actions: device screenshots and opening the project in an IDE / Terminal.
 enum DeviceTools {
     // MARK: - Screenshots
@@ -16,8 +38,26 @@ enum DeviceTools {
 
     /// Saves a PNG of the destination's screen and returns its URL.
     static func screenshot(of destination: Simulator, label: String) async throws -> URL {
-        try FileManager.default.createDirectory(at: screenshotsFolder, withIntermediateDirectories: true)
         let url = screenshotURL(label: label)
+        do {
+            try await capture(destination, to: url)
+        } catch let error as ScreenshotError {
+            throw error
+        } catch {
+            // simctl / adb report a blocked Desktop as "Operation not permitted".
+            let text = error.localizedDescription.lowercased()
+            if text.contains("not permitted") || text.contains("permission denied") {
+                throw ScreenshotError.desktopPermission
+            }
+            throw error
+        }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw RunError.toolMissing("The screenshot command finished but no image was written.")
+        }
+        return url
+    }
+
+    private static func capture(_ destination: Simulator, to url: URL) async throws {
         switch destination.kind {
         case .simulator:
             guard destination.isBooted else {
@@ -39,10 +79,6 @@ enum DeviceTools {
             }
             try await appleDeviceScreenshot(destination, to: url)
         }
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw RunError.toolMissing("The screenshot command finished but no image was written.")
-        }
-        return url
     }
 
     /// Physical iPhone/iPad (USB or Wi-Fi). Apple doesn't ship a command-line screenshot tool
@@ -74,13 +110,18 @@ enum DeviceTools {
             failures.append("idevicescreenshot: \(summary(result))")
         }
 
-        let setup = "Install pymobiledevice3 (brew install pipx && pipx install pymobiledevice3), then keep "
-            + "`sudo pymobiledevice3 remote tunneld` running in Terminal. iOS 17+ devices need that tunnel, "
-            + "including over Wi-Fi."
-        if failures.isEmpty {
-            throw RunError.toolMissing("Screenshots of a physical iPhone need a helper tool, because Apple doesn't ship one. " + setup)
+        // Nothing usable installed (or only idevicescreenshot, which rarely works on iOS 17+).
+        if failures.isEmpty || pymobiledevice3Path == nil {
+            throw ScreenshotError.helperMissing
         }
-        throw RunError.toolMissing("Couldn't capture \(device.name). " + failures.joined(separator: " · ") + ". " + setup)
+        let details = failures.joined(separator: " · ")
+        let lowered = details.lowercased()
+        let looksLikeConnection = ["tunnel", "rsd", "unable to connect", "connection", "no device", "not found"]
+            .contains { lowered.contains($0) }
+        if needsTunnel(device) || looksLikeConnection {
+            throw ScreenshotError.tunnelNotRunning(details: details)
+        }
+        throw RunError.toolMissing("Couldn't capture \(device.name). \(details)")
     }
 
     private static func summary(_ result: ShellResult) -> String {
