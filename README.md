@@ -15,9 +15,9 @@ The popup, top to bottom:
    - **Open in Xcode / Android Studio / VS Code**, **Reveal in Finder**, **Open in Terminal**
    - **Reload Schemes** (Xcode) or **Open Log File**
    - For Xcode projects, the scheme picker sits in the Actions header.
-   - **Git** appears at the top of the section when the project is in a git repository. It's a full-width **branch row** (`⎇ develop · up to date with origin/develop · 10 changed  ›`). Hover over it or click it to open a native menu to its right. A menu opened by hovering closes again when the pointer moves away from both the row and the menu.
+   - **Git** appears at the top of the section when the project is in a git repository. It's a full-width **branch row** (`⎇ develop · up to date with origin/develop · 10 changed  ›`). Click it to open a native menu to its right.
      - While the status loads, the row shows a spinner and "Reading branch, changes and remotes…" in the same space, so nothing below it jumps. Folders outside a git repository show a dimmed "No git repository" row.
-     - **Pull** (`git pull --ff-only`, never creates a merge commit), **Push** (`git push`, or `git push -u origin <branch>` the first time) asks first: it shows "Push 3 commits to origin/main?" with the commit list, and nothing is sent until you press **Push**. **Fetch** (`git fetch --all --prune`), **New Branch from <current>…** (`git switch -c`) and **Refresh Status**
+     - **Pull** (`git pull --ff-only`, never creates a merge commit), **Push** (`git push`, or `git push -u origin <branch>` the first time) asks first: it shows "Push 3 commits to origin/main?" with the commit list, and nothing is sent until you press **Push**. **Fetch** (`git fetch --all --prune`), **New Branch from Current…** (`git switch -c`) and **Refresh Status**
      - **Commit…** (also a **Commit N Changes…** button under the branch row whenever there are changes) opens a window: changed files with checkboxes on the left, the selected file's diff on the right, and a message box. Only the checked files are committed (⌘↩); anything else you had staged stays staged.
      - **Local Branches ›**, a submenu where ✓ marks the current branch; pick another to switch to it
      - **Remote Branches ›**, a submenu grouped by remote; pick one to check it out with `git switch --track`

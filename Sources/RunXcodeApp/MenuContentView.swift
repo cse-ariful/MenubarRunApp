@@ -848,7 +848,7 @@ private struct MessageBanner: View {
 
 // MARK: - Git (branch row → native submenu with pull / push / fetch / new branch / branches)
 
-/// Full-width branch row. Hovering (or clicking) opens a native menu to its right, like a submenu:
+/// Full-width branch row. Clicking it opens a native menu to its right, like a submenu:
 /// Pull, Push, Fetch, New Branch…, Refresh, then local and remote branches.
 private struct GitPanel: View {
     let project: XcodeProject
@@ -864,9 +864,6 @@ private struct GitPanel: View {
     @State private var isCreatingBranch = false
     @State private var newBranchName = ""
     @State private var anchor = MenuAnchorBox()
-    @State private var hovering = false
-    /// After the menu closes, don't reopen until the pointer leaves and re-enters the row.
-    @State private var suppressHover = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -1049,18 +1046,7 @@ private struct GitPanel: View {
         .contentShape(Rectangle())
         .listRow()
         .background(MenuAnchor(box: anchor))
-        .onHover { inside in
-            hovering = inside
-            guard inside else {
-                suppressHover = false
-                return
-            }
-            guard !suppressHover else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                if hovering, !suppressHover, busy == nil { openMenu(fromHover: true) }
-            }
-        }
-        .onTapGesture { openMenu(fromHover: false) }
+        .onTapGesture { openMenu() }
         .help("Git: pull, push, fetch, branches")
     }
 
@@ -1092,18 +1078,13 @@ private struct GitPanel: View {
 
     // MARK: Menu
 
-    /// Pops up the git menu to the right of the row, like a submenu. When opened by hovering,
-    /// it closes again once the pointer has left both the row and every open (sub)menu.
-    private func openMenu(fromHover: Bool) {
+    /// Pops up the git menu to the right of the row, like a submenu (on click only).
+    private func openMenu() {
         guard let status, busy == nil, let view = anchor.view else { return }
-        suppressHover = true
         let menu = buildMenu(status)
         let point = NSPoint(x: view.bounds.maxX + 2, y: view.isFlipped ? view.bounds.minY : view.bounds.maxY)
         DispatchQueue.main.async {
-            let watcher = fromHover ? HoverAwayWatcher(menu: menu, anchor: view) : nil
-            watcher?.start()
-            _ = menu.popUp(positioning: nil, at: point, in: view)  // returns when the menu closes
-            watcher?.stop()
+            _ = menu.popUp(positioning: nil, at: point, in: view)
         }
     }
 
@@ -1134,7 +1115,7 @@ private struct GitPanel: View {
         })
 
         menu.addItem(ClosureMenuItem(
-            title: "New Branch from \(status.isDetached ? "HEAD" : status.branch)…",
+            title: "New Branch from Current…",
             symbol: "plus"
         ) {
             newBranchName = ""
@@ -1264,57 +1245,6 @@ private struct PushPreview: Equatable {
         let commits = count == 1 ? "1 commit" : "\(count) commits"
         return isPublish ? "Publish branch to \(target)?" + (count > 0 ? " (\(commits))" : "")
                          : "Push \(commits) to \(target)?"
-    }
-}
-
-/// While a hover-opened menu is showing, polls the pointer and closes the menu once it has been
-/// outside the row and all open menu windows (including submenus) for about half a second.
-/// The timer runs in `.common` modes so it keeps firing during menu tracking.
-private final class HoverAwayWatcher {
-    private let menu: NSMenu
-    private weak var anchor: NSView?
-    private var timer: Timer?
-    private var outsideTicks = 0
-
-    init(menu: NSMenu, anchor: NSView) {
-        self.menu = menu
-        self.anchor = anchor
-    }
-
-    func start() {
-        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
-    }
-
-    func stop() {
-        timer?.invalidate()
-        timer = nil
-    }
-
-    private func tick() {
-        let mouse = NSEvent.mouseLocation
-        var safe: [NSRect] = []
-        if let anchor, let window = anchor.window {
-            safe.append(window.convertToScreen(anchor.convert(anchor.bounds, to: nil)).insetBy(dx: -4, dy: -4))
-        }
-        // Visible menu windows (the menu and any open submenus).
-        for window in NSApp.windows where window.isVisible && window.level.rawValue >= NSWindow.Level.popUpMenu.rawValue {
-            safe.append(window.frame.insetBy(dx: -6, dy: -6))
-        }
-        // Corridor between the row and the menu so moving across the small gap doesn't close it.
-        if safe.count >= 2 {
-            safe.append(safe[0].union(safe[1]))
-        }
-        if safe.contains(where: { $0.contains(mouse) }) {
-            outsideTicks = 0
-        } else {
-            outsideTicks += 1
-            if outsideTicks >= 5 {  // ~0.5 s outside
-                stop()
-                menu.cancelTracking()
-            }
-        }
     }
 }
 
