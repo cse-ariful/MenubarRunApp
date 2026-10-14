@@ -104,6 +104,70 @@ enum DeviceTools {
         return screenshotsFolder.appendingPathComponent("\(safe) \(formatter.string(from: Date())).png")
     }
 
+    // MARK: - iPhone screenshot helper (pymobiledevice3)
+
+    static var pymobiledevice3Path: String? { Shell.which("pymobiledevice3") }
+
+    /// True if some tool that can screenshot a physical iPhone is installed.
+    static var hasAppleDeviceHelper: Bool {
+        pymobiledevice3Path != nil || Shell.which("idevicescreenshot") != nil
+    }
+
+    static var brewPath: String? {
+        ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) } ?? Shell.which("brew")
+    }
+
+    /// iOS 17+ devices are only reachable through pymobiledevice3's tunnel daemon.
+    static func needsTunnel(_ device: Simulator) -> Bool {
+        guard device.kind == .device, pymobiledevice3Path != nil else { return false }
+        let major = Int(device.version.split(separator: ".").first ?? "") ?? 17
+        return major >= 17
+    }
+
+    static func isTunnelRunning() async -> Bool {
+        let result = try? await Shell.run("/usr/bin/pgrep", ["-f", "pymobiledevice3 remote tunneld"])
+        return result?.succeeded ?? false
+    }
+
+    /// Installs pymobiledevice3 with Homebrew + pipx (asks first in the UI). Takes about a minute.
+    static func installAppleDeviceHelper() async throws {
+        guard let brew = brewPath else {
+            throw RunError.toolMissing("Homebrew isn't installed. Install it from https://brew.sh, then click Screenshot again.")
+        }
+        if Shell.which("pipx") == nil {
+            try await Shell.checked(brew, ["install", "pipx"])
+        }
+        let brewBin = (brew as NSString).deletingLastPathComponent
+        let pipx = Shell.which("pipx") ?? (brewBin as NSString).appendingPathComponent("pipx")
+        try await Shell.checked(pipx, ["install", "pymobiledevice3"])
+        guard pymobiledevice3Path != nil else {
+            throw RunError.toolMissing("pymobiledevice3 was installed but couldn't be found. Run `pipx ensurepath`, then restart RunXcodeApp.")
+        }
+    }
+
+    /// Opens Terminal running `sudo pymobiledevice3 remote tunneld`, so the user types their own password
+    /// and can see what runs. Uses a .command file, so no Automation permission is needed.
+    static func startTunnelInTerminal() throws {
+        guard let tool = pymobiledevice3Path else {
+            throw RunError.toolMissing("pymobiledevice3 isn't installed.")
+        }
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("RunXcodeApp", isDirectory: true)
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        let script = support.appendingPathComponent("start-ios-tunnel.command")
+        let contents = """
+        #!/bin/bash
+        echo "RunXcodeApp: starting the iOS device tunnel (needed for iPhone screenshots on iOS 17+)."
+        echo "Enter your Mac password if asked, then keep this window open."
+        echo
+        sudo '\(tool)' remote tunneld
+        """
+        try contents.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        open(script, with: terminal)
+    }
+
     // MARK: - Opening the project
 
     private static let vsCode = "com.microsoft.VSCode"
