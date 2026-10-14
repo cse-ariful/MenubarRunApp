@@ -56,18 +56,22 @@ enum DeviceTools {
             }
             try await Shell.checked(Shell.xcrunPath, ["simctl", "io", destination.udid, "screenshot", url.path])
         case .device:
-            // Xcode command-line tools only: `xcrun simctl io <udid> screenshot <file>`.
-            // simctl is meant for simulators, so a physical device may be refused; show Xcode's own error.
+            // Physical iPhone/iPad (USB or Wi-Fi): Xcode's devicectl.
+            //   xcrun devicectl device screenshot --device <udid> <file>
             guard !destination.isOffline else {
                 throw RunError.toolMissing("\(destination.name) is offline.")
             }
-            let result = try await Shell.run(Shell.xcrunPath, ["simctl", "io", destination.udid, "screenshot", url.path])
+            let result = try await Shell.run(
+                Shell.xcrunPath,
+                ["devicectl", "device", "screenshot", "--device", destination.udid, url.path]
+            )
             if !result.succeeded || !FileManager.default.fileExists(atPath: url.path) {
                 let output = (result.stderr.isEmpty ? result.stdout : result.stderr)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 throw RunError.toolMissing(
-                    "xcrun simctl couldn't capture \(destination.name) (simctl only supports simulators)."
+                    "devicectl couldn't capture \(destination.name)."
                         + (output.isEmpty ? "" : " Xcode said: \(output)")
+                        + " Make sure it's unlocked and trusted, and Xcode can see it."
                 )
             }
         case .androidEmulator, .androidDevice:

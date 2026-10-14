@@ -11,7 +11,7 @@ The popup, top to bottom:
 3. **Actions** for the selected project:
    - **Run on <device>** (⌘R) or **Stop** (⌘.), plus **Hot Reload** (⌘R) and hot restart (⇧⌘R) for Flutter
    - **Show / Hide Logs**, the live build log for this project
-   - **Screenshot**, which saves the target device's screen to the **Desktop** and copies it to the clipboard. It uses only Xcode's own command, `xcrun simctl io <udid> screenshot <file>`, for Apple targets, and `adb` for Android. Simulators and Android emulators and phones work. For a **physical iPhone** the app tries the same `simctl` command and shows Xcode's reply if it refuses, since `simctl` is designed for simulators. The first time, allow RunXcodeApp to access the Desktop folder if macOS asks. If saving is blocked, the error offers **Open Privacy Settings**. Messages have an ✕ and clear when the popup closes.
+   - **Screenshot**, which saves the target device's screen to the **Desktop** and copies it to the clipboard. It uses Xcode's own tools: `xcrun simctl io <udid> screenshot <file>` for simulators, and `xcrun devicectl device screenshot --device <udid> <file>` for **physical iPhones and iPads** (USB or Wi-Fi). Android emulators and phones use `adb`. Nothing extra to install. The first time, allow RunXcodeApp to access the Desktop folder if macOS asks. If saving is blocked, the error offers **Open Privacy Settings**. Messages have an ✕ and clear when the popup closes.
    - **Open in Xcode / Android Studio / VS Code**, **Reveal in Finder**, **Open in Terminal**
    - **Reload Schemes** (Xcode) or **Open Log File**
    - For Xcode projects, the scheme picker sits in the Actions header.
