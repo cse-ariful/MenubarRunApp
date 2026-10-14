@@ -178,19 +178,25 @@ private struct CommitView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView([.vertical, .horizontal]) {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(diffLines.enumerated()), id: \.offset) { _, line in
-                            Text(line.isEmpty ? " " : line)
-                                .font(.system(size: 11.5, design: .monospaced))
-                                .foregroundStyle(lineColor(line))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 8)
-                                .background(lineBackground(line))
+                // Lines never wrap (scroll sideways for long ones); every row is at least as wide
+                // as the pane so the +/- highlight spans the full width.
+                GeometryReader { geometry in
+                    ScrollView([.vertical, .horizontal]) {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(diffLines.enumerated()), id: \.offset) { _, line in
+                                Text(line.isEmpty ? " " : line)
+                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .foregroundStyle(lineColor(line))
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .padding(.horizontal, 8)
+                                    .frame(minWidth: geometry.size.width, alignment: .leading)
+                                    .background(lineBackground(line))
+                            }
                         }
+                        .padding(.vertical, 6)
+                        .textSelection(.enabled)
                     }
-                    .padding(.vertical, 6)
-                    .textSelection(.enabled)
                 }
                 .background(Color(nsColor: .textBackgroundColor))
             }
