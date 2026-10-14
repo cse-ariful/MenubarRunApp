@@ -854,7 +854,11 @@ private struct GitPanel: View {
     let project: XcodeProject
 
     @State private var status: GitStatus? = nil
+    /// False until the first status read finishes; a placeholder row holds the space meanwhile.
+    @State private var loaded = false
     @State private var busy: String? = nil
+    /// Set while the push confirmation is showing.
+    @State private var pushPreview: PushPreview? = nil
     @State private var message: String? = nil
     @State private var messageIsError = false
     @State private var isCreatingBranch = false
@@ -869,6 +873,14 @@ private struct GitPanel: View {
             if let status {
                 branchRow(status)
 
+                if let pushPreview {
+                    pushConfirmation(pushPreview, status: status)
+                }
+
+                if status.changes > 0, pushPreview == nil, !isCreatingBranch {
+                    commitButton(status)
+                }
+
                 if isCreatingBranch {
                     newBranchField(status)
                 }
@@ -881,18 +893,134 @@ private struct GitPanel: View {
 
                 Divider()
             } else {
-                // Not a git repository (or not loaded yet): show nothing.
-                Color.clear.frame(height: 0)
+                // Same height as the branch row, so nothing jumps when the status arrives.
+                placeholderRow
+                Divider()
             }
         }
-        .task(id: project.id) { await refresh() }
-        .onDisappear { message = nil; isCreatingBranch = false }
+        .task(id: project.id) {
+            await refresh()
+            loaded = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .gitRepositoryChanged)) { note in
+            guard let root = note.object as? URL, root == status?.root else { return }
+            message = "Committed to \(status?.branch ?? "branch")."
+            messageIsError = false
+            Task { await refresh() }
+        }
+        .onDisappear { message = nil; isCreatingBranch = false; pushPreview = nil }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
             message = nil
         }
     }
 
     // MARK: Row
+
+    /// Shown while the first status read runs, and for folders that aren't in a git repository.
+    private var placeholderRow: some View {
+        HStack(spacing: 10) {
+            Group {
+                if loaded {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.title3)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .frame(width: 28, height: 28)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(loaded ? "No git repository" : "Git")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(loaded ? .secondary : .primary)
+                Text(loaded ? "This project folder isn't tracked by git." : "Reading branch, changes and remotes…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 4)
+        }
+        .listRow()
+    }
+
+    private func commitButton(_ status: GitStatus) -> some View {
+        ActionTile(
+            title: status.changes == 1 ? "Commit 1 Change…" : "Commit \(status.changes) Changes…",
+            systemImage: "checkmark.circle",
+            disabled: busy != nil
+        ) {
+            CommitWindow.show(root: status.root, branch: status.isDetached ? "detached HEAD" : status.branch)
+        }
+        .padding(.horizontal, 8)
+    }
+
+    /// Inline "Push N commits to origin/main?" with the commit list, Cancel and Push.
+    private func pushConfirmation(_ preview: PushPreview, status: GitStatus) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(preview.title, systemImage: "arrow.up.circle.fill")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.primary)
+            if preview.subjects.isEmpty {
+                Text(preview.isPublish ? "No new commits; this creates the branch on the remote."
+                                       : "Nothing new to push.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(preview.subjects.prefix(5), id: \.self) { line in
+                        Text(line)
+                            .font(.caption.monospaced())
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    if preview.count > 5 {
+                        Text("and \(preview.count - 5) more")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { withAnimation { pushPreview = nil } }
+                    .controlSize(.small)
+                    .keyboardShortcut(.cancelAction)
+                Button("Push") {
+                    pushPreview = nil
+                    perform("Pushing…", success: "Pushed \(status.branch) to \(preview.target).") {
+                        try await Git.push(status)
+                    }
+                }
+                .controlSize(.small)
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.1)))
+        .padding(.horizontal, 8)
+    }
+
+    /// Loads the outgoing commits, then shows the confirmation.
+    private func confirmPush(_ status: GitStatus) {
+        guard busy == nil else { return }
+        busy = "Checking what to push…"
+        message = nil
+        isCreatingBranch = false
+        Task {
+            let outgoing = await Git.outgoing(status)
+            busy = nil
+            if outgoing.count == 0 && status.upstream != nil {
+                message = "Nothing to push: \(status.branch) is up to date with \(status.upstream!)."
+                messageIsError = false
+                return
+            }
+            withAnimation {
+                pushPreview = PushPreview(target: Git.pushTarget(status), count: outgoing.count,
+                                          subjects: outgoing.subjects, isPublish: status.upstream == nil)
+            }
+        }
+    }
 
     private func branchRow(_ status: GitStatus) -> some View {
         HStack(spacing: 10) {
@@ -993,7 +1121,13 @@ private struct GitPanel: View {
             title: status.ahead > 0 ? "Push  ↑\(status.ahead)" : (status.upstream == nil ? "Push (set upstream)" : "Push"),
             symbol: "arrow.up.to.line",
             enabled: !status.isDetached
-        ) { perform("Pushing…", success: "Pushed \(status.branch).") { try await Git.push(status) } })
+        ) { confirmPush(status) })
+
+        menu.addItem(ClosureMenuItem(
+            title: status.changes > 0 ? "Commit \(status.changes) Change\(status.changes == 1 ? "" : "s")…" : "Commit…",
+            symbol: "checkmark.circle",
+            enabled: status.changes > 0
+        ) { CommitWindow.show(root: status.root, branch: status.isDetached ? "detached HEAD" : status.branch) })
 
         menu.addItem(ClosureMenuItem(title: "Fetch", symbol: "arrow.down.circle") {
             perform("Fetching…", success: "Fetched.") { try await Git.fetch(status) }
@@ -1004,11 +1138,17 @@ private struct GitPanel: View {
             symbol: "plus"
         ) {
             newBranchName = ""
+            pushPreview = nil
             withAnimation { isCreatingBranch = true }
         })
 
         menu.addItem(ClosureMenuItem(title: "Refresh Status", symbol: "arrow.clockwise") {
-            Task { await refresh() }
+            guard busy == nil else { return }
+            busy = "Reading branch, changes and remotes…"
+            Task {
+                await refresh()
+                busy = nil
+            }
         })
 
         menu.addItem(.separator())
@@ -1109,6 +1249,21 @@ private struct GitPanel: View {
 
     private func refresh() async {
         status = await Git.status(for: project.directory)
+    }
+}
+
+/// What a push would send, for the confirmation.
+private struct PushPreview: Equatable {
+    let target: String
+    let count: Int
+    let subjects: [String]
+    /// The branch has no upstream yet; the push creates it.
+    let isPublish: Bool
+
+    var title: String {
+        let commits = count == 1 ? "1 commit" : "\(count) commits"
+        return isPublish ? "Publish branch to \(target)?" + (count > 0 ? " (\(commits))" : "")
+                         : "Push \(commits) to \(target)?"
     }
 }
 

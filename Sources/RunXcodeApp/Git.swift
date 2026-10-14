@@ -22,6 +22,8 @@ struct GitStatus: Equatable {
 enum GitError: LocalizedError {
     case failed(command: String, output: String)
     case invalidBranchName(String)
+    case emptyMessage
+    case nothingSelected
 
     var errorDescription: String? {
         switch self {
@@ -29,6 +31,10 @@ enum GitError: LocalizedError {
             return "git \(command) failed" + (output.isEmpty ? "." : ": \(output)")
         case let .invalidBranchName(name):
             return "“\(name)” isn't a valid branch name."
+        case .emptyMessage:
+            return "Enter a commit message."
+        case .nothingSelected:
+            return "Select at least one file to commit."
         }
     }
 }
@@ -45,8 +51,10 @@ enum Git {
     ]
 
     @discardableResult
-    private static func run(_ arguments: [String], in directory: URL) async throws -> String {
-        let result = try await Shell.run(path, ["-C", directory.path] + arguments, environment: environment)
+    private static func run(_ arguments: [String], in directory: URL, trim: Bool = true,
+                            extraEnvironment: [String: String] = [:]) async throws -> String {
+        let env = environment.merging(extraEnvironment) { $1 }
+        let result = try await Shell.run(path, ["-C", directory.path] + arguments, environment: env)
         guard result.succeeded else {
             let output = (result.stderr.isEmpty ? result.stdout : result.stderr)
                 .split(whereSeparator: \.isNewline)
@@ -56,7 +64,7 @@ enum Git {
                 .joined(separator: " ")
             throw GitError.failed(command: arguments.first ?? "", output: output)
         }
-        return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trim ? result.stdout.trimmingCharacters(in: .whitespacesAndNewlines) : result.stdout
     }
 
     private static func lines(_ text: String) -> [String] {
@@ -130,4 +138,107 @@ enum Git {
         }
         try await run(["switch", "-c", trimmed], in: status.root)
     }
+
+    // MARK: - Push preview
+
+    /// Commits a push would send: everything ahead of the upstream, or (no upstream yet)
+    /// everything not on any remote. `subjects` holds at most `limit` one-line summaries.
+    static func outgoing(_ status: GitStatus, limit: Int = 20) async -> (count: Int, subjects: [String]) {
+        let range = status.upstream != nil ? ["@{u}..HEAD"] : ["HEAD", "--not", "--remotes"]
+        let count = Int((try? await run(["rev-list", "--count"] + range, in: status.root)) ?? "") ?? 0
+        let log = (try? await run(["log", "--no-color", "--no-decorate", "--format=%h %s", "-n", "\(limit)"] + range,
+                                  in: status.root)) ?? ""
+        return (count, lines(log))
+    }
+
+    /// Where a push goes, e.g. "origin/main".
+    static func pushTarget(_ status: GitStatus) -> String {
+        if let upstream = status.upstream { return upstream }
+        let remote = status.remotes.contains("origin") ? "origin" : (status.remotes.first ?? "origin")
+        return "\(remote)/\(status.branch)"
+    }
+
+    // MARK: - Commit
+
+    /// Paths are matched literally (no glob or `:(magic)` interpretation).
+    private static let literalPaths = ["GIT_LITERAL_PATHSPECS": "1"]
+
+    /// Pending changes, one entry per file (renames are listed as a delete plus an add).
+    static func changes(in root: URL) async throws -> [GitChange] {
+        let output = try await run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"],
+                                   in: root, trim: false)
+        return output.split(separator: "\0").compactMap { entry -> GitChange? in
+            let chars = Array(entry)
+            guard chars.count > 3 else { return nil }
+            return GitChange(path: String(chars[3...]), index: chars[0], worktree: chars[1])
+        }
+        .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    /// Diff of one file against HEAD (staged and unstaged together); new files are shown in full.
+    static func diff(of change: GitChange, in root: URL) async -> String {
+        if change.isUntracked {
+            let url = root.appendingPathComponent(change.path)
+            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+                return "(can't read \(change.path))"
+            }
+            if data.prefix(8000).contains(0) { return "Binary file" }
+            let text = String(decoding: data.prefix(400_000), as: UTF8.self)
+            return "new file\n" + text.split(separator: "\n", omittingEmptySubsequences: false)
+                .map { "+" + $0 }.joined(separator: "\n")
+        }
+        let base = ["diff", "--no-color", "--no-ext-diff"]
+        if let text = try? await run(base + ["HEAD", "--", change.path], in: root, trim: false,
+                                     extraEnvironment: literalPaths) {
+            return text.isEmpty ? "No content changes (mode or metadata only)." : text
+        }
+        // No commits yet: compare the index with the working tree, plus what's staged.
+        let staged = (try? await run(base + ["--cached", "--", change.path], in: root, trim: false,
+                                     extraEnvironment: literalPaths)) ?? ""
+        let unstaged = (try? await run(base + ["--", change.path], in: root, trim: false,
+                                       extraEnvironment: literalPaths)) ?? ""
+        return staged + unstaged
+    }
+
+    /// Commits exactly `changes` with `message`. Anything else that was already staged stays staged
+    /// and is not part of the commit (`git commit --only`).
+    static func commit(_ changes: [GitChange], message: String, in root: URL) async throws {
+        let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { throw GitError.emptyMessage }
+        guard !changes.isEmpty else { throw GitError.nothingSelected }
+
+        // New files and unstaged edits/deletions must be in the index before `commit --only` sees them.
+        let toAdd = changes.filter { $0.isUntracked || $0.worktree != " " }.map(\.path)
+        if !toAdd.isEmpty {
+            try await run(["add", "-A", "--"] + toAdd, in: root, extraEnvironment: literalPaths)
+        }
+        try await run(["commit", "--only", "-m", text, "--"] + changes.map(\.path),
+                      in: root, extraEnvironment: literalPaths)
+    }
+}
+
+/// One changed file from `git status --porcelain`.
+struct GitChange: Identifiable, Hashable {
+    let path: String
+    /// Index (staged) status letter.
+    let index: Character
+    /// Working-tree status letter.
+    let worktree: Character
+
+    var id: String { path }
+    var isUntracked: Bool { index == "?" }
+
+    /// Single-letter badge: A, M, D, U (conflict) or ? (untracked).
+    var badge: String {
+        if isUntracked { return "?" }
+        if index == "U" || worktree == "U" || (index == "A" && worktree == "A") || (index == "D" && worktree == "D") {
+            return "U"
+        }
+        if index == "D" || worktree == "D" { return "D" }
+        if index == "A" { return "A" }
+        return "M"
+    }
+
+    var fileName: String { (path as NSString).lastPathComponent }
+    var folder: String { (path as NSString).deletingLastPathComponent }
 }
