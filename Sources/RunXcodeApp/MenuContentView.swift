@@ -14,7 +14,6 @@ struct MenuContentView: View {
     @EnvironmentObject private var projects: ProjectStore
     @EnvironmentObject private var runner: BuildRunner
 
-    @AppStorage("showLog") private var showLog = false
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     /// A drill-in page (devices, projects, git) replacing the main content, or nil.
     @State private var page: PopupPage? = nil
@@ -89,7 +88,7 @@ struct MenuContentView: View {
         VStack(alignment: .leading, spacing: 0) {
             SimulatorRow { show(.devices) }
             if let project = projects.selectedProject {
-                RunControls(project: project, showLog: $showLog)
+                RunControls(project: project)
                     .padding(.horizontal, 8)
                     .padding(.top, 4)
                     .padding(.bottom, 2)
@@ -107,11 +106,11 @@ struct MenuContentView: View {
                 ProjectPickerRow { show(.projects) }
                 if let project = projects.selectedProject {
                     RowDivider()
-                    ActionsSection(project: project, showLog: $showLog) { show(.git) }
+                    ActionsSection(project: project) { show(.git) }
                 }
             }
             RowDivider()
-            AddFolderRow(showLog: $showLog, launchAtLogin: $launchAtLogin)
+            AddFolderRow(launchAtLogin: $launchAtLogin)
             RowDivider()
             QuitRow()
         }
@@ -135,35 +134,47 @@ struct ProjectPickerRow: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: projects.selectedProject?.symbolName ?? "folder")
-                    .font(.title3)
-                    .foregroundStyle(.tint)
-                    .frame(width: 28, height: 28)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(projects.selectedProject?.name ?? "Select a project")
-                        .font(.body.weight(.semibold))
-                        .lineLimit(1)
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+        HStack(alignment: .center, spacing: 8) {
+            Button(action: action) {
+                HStack(spacing: 10) {
+                    Image(systemName: projects.selectedProject?.symbolName ?? "folder")
+                        .font(.title3)
+                        .foregroundStyle(.tint)
+                        .frame(width: 28, height: 28)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(projects.selectedProject?.name ?? "Select a project")
+                            .font(.body.weight(.semibold))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .layoutPriority(1)
+                    Spacer(minLength: 4)
+                    if runner.runningCount > 0 {
+                        Text("\(runner.runningCount) running")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.green.opacity(0.2)))
+                            .foregroundStyle(.green)
+                    }
                 }
-                Spacer(minLength: 4)
-                if runner.runningCount > 0 {
-                    Text("\(runner.runningCount) running")
-                        .font(.caption2.weight(.semibold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.green.opacity(0.2)))
-                        .foregroundStyle(.green)
-                }
-                DrillChevron(isOpen: isOpen)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+
+            // The selected Xcode project's scheme (what Run builds), vertically centred on the row.
+            if let project = projects.selectedProject, project.isXcode {
+                SchemeMenu(project: project)
+            }
+
+            Button(action: action) { DrillChevron(isOpen: isOpen) }
+                .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
         .listRow()
         .popupMatched("projects")
         .help(isOpen ? "Back" : "Choose another project")
@@ -173,6 +184,77 @@ struct ProjectPickerRow: View {
         let count = projects.projects.count
         let kind = projects.selectedProject?.kindLabel ?? "Project"
         return "\(kind) · \(count) project\(count == 1 ? "" : "s")"
+    }
+}
+
+/// Scheme picker for an Xcode project, shown on the selected project's row.
+struct SchemeMenu: View {
+    let project: XcodeProject
+    @EnvironmentObject private var projects: ProjectStore
+
+    private var scheme: String? { projects.selectedScheme(for: project) }
+    private var isLoading: Bool { projects.loadingSchemes.contains(project.id) }
+
+    /// At most 14 characters, shortened in the middle ("MyApp…Staging").
+    private static func shortened(_ name: String, limit: Int = 14) -> String {
+        guard name.count > limit else { return name }
+        let head = (limit - 1) / 2 + (limit - 1) % 2
+        let tail = (limit - 1) / 2
+        return String(name.prefix(head)) + "…" + String(name.suffix(tail))
+    }
+
+    private var schemes: [String] { projects.schemes[project.id] ?? [] }
+
+    var body: some View {
+        if isLoading {
+            ProgressView()
+                .controlSize(.mini)
+                .padding(.horizontal, 8)
+                .help("Loading schemes…")
+        } else {
+            Menu {
+                if !schemes.isEmpty {
+                    Picker("Scheme", selection: Binding(
+                        get: { scheme },
+                        set: { projects.setScheme($0, for: project) }
+                    )) {
+                        ForEach(schemes, id: \.self) { name in
+                            Text(name).tag(String?.some(name))
+                        }
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                    Divider()
+                }
+                // Re-read the schemes (e.g. after adding or sharing one in Xcode).
+                Button("Refresh Schemes") {
+                    Task { await projects.loadSchemes(for: project, force: true) }
+                }
+            } label: {
+                // Short label so the project name keeps most of the row; the full name is in the tooltip.
+                Label(Self.shortened(label), systemImage: "list.bullet.rectangle")
+                    .font(.caption)
+                    .lineLimit(1)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(Capsule().fill((schemes.isEmpty ? Color.red : Color.primary).opacity(0.08)))
+            .help(help)
+        }
+    }
+
+    private var label: String {
+        if schemes.isEmpty { return "No schemes" }
+        return scheme ?? "Scheme"
+    }
+
+    private var help: String {
+        if schemes.isEmpty {
+            return projects.schemeErrors[project.id] ?? "No schemes found. Choose Refresh Schemes to look again."
+        }
+        return "Scheme: \(scheme ?? "none") (what Run builds)"
     }
 }
 
@@ -420,7 +502,6 @@ struct RunStateBadge: View {
 /// Status line, Run / Stop (and hot reload for Flutter) for the selected project.
 private struct RunControls: View {
     let project: XcodeProject
-    @Binding var showLog: Bool
 
     @EnvironmentObject private var simulators: SimulatorStore
     @EnvironmentObject private var projects: ProjectStore
@@ -444,8 +525,9 @@ private struct RunControls: View {
 
             if phase != .idle {
                 statusLine
-                    .onTapGesture { withAnimation { showLog.toggle() } }
-                    .help("Click to show or hide the log")
+                    .contentShape(Rectangle())
+                    .onTapGesture { LogWindow.show(project: project, runner: runner) }
+                    .help("Click to open the logs")
             }
         }
     }
@@ -563,13 +645,13 @@ private struct RunControls: View {
         }
         .font(.caption)
     }
+
 }
 
 // MARK: - Actions for the selected project
 
 private struct ActionsSection: View {
     let project: XcodeProject
-    @Binding var showLog: Bool
     let openGit: () -> Void
 
     @EnvironmentObject private var simulators: SimulatorStore
@@ -595,19 +677,13 @@ private struct ActionsSection: View {
             GitSummary(open: openGit)
                 .padding(.horizontal, -8)
 
-            HStack(spacing: 6) {
-                SectionHeader(title: "Actions", systemImage: "bolt.horizontal")
-                Spacer()
-                if project.isXcode {
-                    Text("Scheme").font(.caption).foregroundStyle(.secondary)
-                    schemeMenu
-                }
-            }
+            SectionHeader(title: "Actions", systemImage: "bolt.horizontal")
 
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
-                ActionTile(title: showLog ? "Hide Logs" : "Show Logs", systemImage: "text.alignleft") {
-                    withAnimation { showLog.toggle() }
+                ActionTile(title: "Logs", systemImage: "text.alignleft") {
+                    LogWindow.show(project: project, runner: runner)
                 }
+                .help("Open the build and app logs in a window, with a filter")
                 ActionTile(title: isCapturing ? "Capturing…" : "Screenshot",
                            systemImage: "camera",
                            disabled: isCapturing || !DeviceTools.canScreenshot(destination)) {
@@ -628,14 +704,8 @@ private struct ActionsSection: View {
                 ActionTile(title: "Open in Terminal", systemImage: "terminal") {
                     DeviceTools.openInTerminal(project)
                 }
-                if project.isXcode {
-                    ActionTile(title: "Reload Schemes", systemImage: "arrow.triangle.2.circlepath") {
-                        Task { await projects.loadSchemes(for: project, force: true) }
-                    }
-                } else {
-                    ActionTile(title: "Open Log File", systemImage: "doc.text", disabled: session == nil) {
-                        if let session { NSWorkspace.shared.open(session.logURL) }
-                    }
+                ActionTile(title: "Open Log File", systemImage: "doc.text", disabled: session == nil) {
+                    if let session { NSWorkspace.shared.open(session.logURL) }
                 }
             }
 
@@ -655,9 +725,6 @@ private struct ActionsSection: View {
                 )
             }
 
-            if showLog {
-                LogPanel()
-            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -722,39 +789,6 @@ private struct ActionsSection: View {
         }
     }
 
-    // MARK: Scheme & status
-
-    @ViewBuilder
-    private var schemeMenu: some View {
-        if projects.loadingSchemes.contains(project.id) {
-            ProgressView().controlSize(.mini)
-        } else if let list = projects.schemes[project.id], !list.isEmpty {
-            Menu {
-                Picker("Scheme", selection: Binding(
-                    get: { scheme },
-                    set: { projects.setScheme($0, for: project) }
-                )) {
-                    ForEach(list, id: \.self) { name in
-                        Text(name).tag(String?.some(name))
-                    }
-                }
-                .pickerStyle(.inline)
-                .labelsHidden()
-                Divider()
-                Button("Reload Schemes") {
-                    Task { await projects.loadSchemes(for: project, force: true) }
-                }
-            } label: {
-                Text(scheme ?? "Select").font(.caption)
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-        } else if let error = projects.schemeErrors[project.id] {
-            Text("No schemes").font(.caption).foregroundStyle(.red).help(error)
-        } else {
-            Text("…").font(.caption)
-        }
-    }
 
 }
 
@@ -868,7 +902,6 @@ private struct AddFolderRow: View {
     @EnvironmentObject private var simulators: SimulatorStore
     @EnvironmentObject private var projects: ProjectStore
     @EnvironmentObject private var runner: BuildRunner
-    @Binding var showLog: Bool
     @Binding var launchAtLogin: Bool
 
     var body: some View {
@@ -893,9 +926,12 @@ private struct AddFolderRow: View {
             }
 
             Menu {
-                Button(showLog ? "Hide Build Log" : "Show Build Log") {
-                    withAnimation { showLog.toggle() }
+                Button("Open Logs") {
+                    if let project = projects.selectedProject {
+                        LogWindow.show(project: project, runner: runner)
+                    }
                 }
+                .disabled(projects.selectedProject == nil)
                 Button("Open Log File") {
                     if let id = projects.selectedProjectID, let session = runner.session(for: id) {
                         NSWorkspace.shared.open(session.logURL)
@@ -947,68 +983,6 @@ private struct AddFolderRow: View {
             .help("More")
         }
         .listRow()
-    }
-}
-
-// MARK: - Log panel
-
-/// Build log of the selected project's run session.
-private struct LogPanel: View {
-    @EnvironmentObject private var runner: BuildRunner
-    @EnvironmentObject private var projects: ProjectStore
-
-    private var session: RunSession? { projects.selectedProjectID.flatMap { runner.session(for: $0) } }
-    private var lines: [String] { session?.logLines ?? [] }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(projects.selectedProject.map { "Log · \($0.name)" } ?? "Log · select a project")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 1) {
-                        ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
-                            Text(line.isEmpty ? " " : line)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(Self.color(for: line))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .id(index)
-                        }
-                    }
-                    .padding(6)
-                    .textSelection(.enabled)
-                }
-                .frame(height: 200)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25)))
-                .onChange(of: session?.logRevision ?? 0) { _ in
-                    if let last = lines.indices.last {
-                        proxy.scrollTo(last, anchor: .bottom)
-                    }
-                }
-            }
-
-            HStack {
-                Button("Open Full Log") { NSWorkspace.shared.open(session?.logURL ?? runner.logsDirectory) }
-                Button("Copy") {
-                    let pasteboard = NSPasteboard.general
-                    pasteboard.clearContents()
-                    pasteboard.setString(lines.joined(separator: "\n"), forType: .string)
-                }
-                Spacer()
-                Text("\(lines.count) lines").font(.caption2).foregroundStyle(.secondary)
-            }
-            .controlSize(.small)
-        }
-    }
-
-    private static func color(for line: String) -> Color {
-        if line.contains(": error:") || line.hasPrefix("✗") || line.contains("** BUILD FAILED **") { return .red }
-        if line.contains(": warning:") { return .orange }
-        if line.hasPrefix("✓") || line.contains("** BUILD SUCCEEDED **") { return .green }
-        if line.hasPrefix("$ ") || line.hasPrefix("▶") { return .accentColor }
-        return .primary
     }
 }
 

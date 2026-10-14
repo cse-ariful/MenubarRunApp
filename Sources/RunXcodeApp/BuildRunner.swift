@@ -106,7 +106,8 @@ final class RunSession: ObservableObject {
     private var runTask: Task<Void, Never>?
     private var flushTimer: Timer?
     private let pending = LineBuffer()
-    private let maxVisibleLines = 2000
+    /// Lines kept in memory for the log window (the log file has everything).
+    private let maxVisibleLines = 5000
     /// True while `flutter run` is attached (stdin open for r / R / q).
     private var isFlutterSession = false
 
@@ -156,6 +157,13 @@ final class RunSession: ObservableObject {
             process?.interrupt()
             DispatchQueue.global().asyncAfter(deadline: .now() + 4) { process?.terminate() }
         }
+    }
+
+    /// Empties the log window's view of this session (the log file is kept).
+    func clearLog() {
+        flushPending()
+        logLines = []
+        logRevision += 1
     }
 
     // MARK: - Flutter hot reload

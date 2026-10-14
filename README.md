@@ -7,10 +7,13 @@ A macOS menu bar app that builds and runs your **Xcode**, **Flutter** and **Andr
 The popup, top to bottom. The device, project and git rows open **drill-in pages**: the popup is replaced by that row at the top with a search field (already focused) and its full list below. The tapped row glides to the top while the popup keeps its height, so nothing jumps. Click the row again (⌃) or press Esc to go back; picking an item goes back too. Closing the popup always returns to the main view.
 
 1. **Target device** of the selected project. Click it to open the **devices page**: a searchable list (by name or runtime) of only the devices that project type supports (Apple targets for Xcode, Android for Android, both for Flutter), grouped by runtime, with ✓ on the current one and a green dot on running simulators. Return picks the first match. Each project remembers its own choice. A **Running** section at the top shuts down any running simulator, or all of them. **Boot** / **Shut Down** on the row acts on the selected simulator using its live state.
-   - Right under the device: **Run on <device>** (⌘R) or **Stop** (⌘.), plus **Hot Reload** (⌘R) and hot restart (⇧⌘R) for Flutter, and the run status line (click it to show or hide the log).
-2. **Project picker.** The selected project. Click it to open the **projects page**: a searchable list (by name, type or path) of the other projects (the selected one is already the header row) with the most recently used first, and the **Archived** section at the bottom (archived matches always show while searching). Return picks the first match. Rows show a run badge (⏳ building, ⚡ hot reload ready, ✓ launched, ✗ failed), because **several projects can run at the same time**.
+   - Right under the device: **Run on <device>** (⌘R) or **Stop** (⌘.), plus **Hot Reload** (⌘R) and hot restart (⇧⌘R) for Flutter, and the run status line (click it to open the logs).
+2. **Project picker.** The selected project. Click it to open the **projects page**: a searchable list (by name, type or path) of the other projects (the selected one is already the header row) with the most recently used first, and the **Archived** section at the bottom (archived matches always show while searching). An **Add Folder…** row stays pinned under the list. Return picks the first match. For Xcode projects, the selected project's row has a compact **scheme picker** on the right, centred on the row (what Run builds; long scheme names are shortened, with the full name in the tooltip). Its menu ends with **Refresh Schemes**; if no schemes were found, the pill says "No schemes" and the menu only offers Refresh Schemes. Rows show a run badge (⏳ building, ⚡ hot reload ready, ✓ launched, ✗ failed), because **several projects can run at the same time**.
 3. **Actions** for the selected project:
-   - **Show / Hide Logs**, the live build log for this project. After launch, the log keeps going with the **app's own output** (the row shows a green ⦿ and "Running · live logs"):
+   - **Logs** opens a **log window** for the project (one per project) with the live build log. After launch, the log keeps going with the **app's own output** (the row shows a green ⦿ and "Running · live logs"):
+     - **Filter bar** at the top: every word you type must appear in a line, so you can filter by a tag, a subsystem or any text. `-word` hides lines containing it, and `"quoted phrases"` stay together. Matches are highlighted. **Aa** matches case, and **.\*** switches to a regular expression.
+     - **Level:** All, Errors & Warnings, or Errors (understands Xcode, Gradle and logcat `E/` / `W/` lines).
+     - **Follow** keeps scrolling to the newest line; turn it off to read back while output keeps coming. Also **Copy** (the lines shown), **Clear** (the window only; the log file is kept), **Open the full log file**, and ⌘F to find. The status bar shows the run state, error and warning counts, and "Showing N of M lines". The window keeps the last 5,000 lines; the log file has everything.
      - **Simulator:** `xcrun simctl launch --console-pty`. You see `print`, `NSLog`, and `os_log` / `Logger` messages, like Xcode's console. **Stop** quits the app.
      - **iPhone / iPad:** `xcrun devicectl device process launch --console`. **Stop** detaches; the app keeps running on the device.
      - **Android:** `adb logcat --pid=<app pid>`. **Stop** force-stops the app.
@@ -22,8 +25,7 @@ The popup, top to bottom. The device, project and git rows open **drill-in pages
      - **Filter files by name** searches the whole tree. **⌘F** opens the find bar in the file. Images are previewed, and binary plists are shown as XML.
      - Buttons to open the file in its default app or reveal it in Finder. Files over 5 MB aren't previewed, and very long files are shown without colours.
    - **Open in Xcode / Android Studio / VS Code**, **Reveal in Finder**, **Open in Terminal**
-   - **Reload Schemes** (Xcode) or **Open Log File**
-   - For Xcode projects, the scheme picker sits in the Actions header.
+   - **Open Log File**
    - **Git** appears at the top of the section when the project is in a git repository. It's a full-width **branch row** (`⎇ develop · up to date with origin/develop · 10 changed  ›`). Click it to open the **git page**.
      - While the status loads, the row shows a spinner and "Reading branch, changes and remotes…" in the same space, so nothing below it jumps. Folders outside a git repository show a dimmed "No git repository" row.
      - The git page has action buttons: **Pull** (`git pull --ff-only`, never creates a merge commit), **Push** (`git push`, or `git push -u origin <branch>` the first time), **Fetch** (`git fetch --all --prune`), **Commit**, **New Branch** (from the current branch, `git switch -c`) and **Refresh**.
@@ -43,7 +45,7 @@ The popup, top to bottom. The device, project and git rows open **drill-in pages
 
 The row menu also has Open in Xcode / Android Studio / VS Code and Reveal in Finder.
 
-**Dock:** while a commit or file browser window is open, RunXcodeApp shows in the Dock and the ⌘-Tab switcher so you can get back to it. When the last window closes, it goes back to menu bar only.
+**Dock:** while a commit, file browser or log window is open, RunXcodeApp shows in the Dock and the ⌘-Tab switcher so you can get back to it. When the last window closes, it goes back to menu bar only.
 
 ## Supported projects (auto-detected)
 
@@ -68,7 +70,7 @@ A Flutter app's `ios/` and `android/` folders aren't listed as separate projects
 - **Scheme picker.** Schemes are read with `xcodebuild -list`. Your last choice is remembered for each project.
 - **Run button (per project).** Builds with `xcodebuild` while the simulator boots, then finds the built `.app`, installs it, and launches it (relaunching if it's already running).
 - **Stop (⌘.).** Cancels the build.
-- **Build log.** Shows live output with error and warning counts. The full log is saved to `~/Library/Logs/RunXcodeApp/last-run.log`.
+- **Log window.** Live build and app output per project, with a text/tag filter and error and warning counts. The full log of each project's last run is saved in `~/Library/Logs/RunXcodeApp/`.
 - **Persistent settings.** Folders, the selected simulator, the selected project and schemes all survive restarts. There's also a **Launch at login** option.
 
 ## Requirements
@@ -166,6 +168,7 @@ After either one, users install or upgrade with `brew install --cask cse-ariful/
 | `PopupPages.swift` | Drill-in pages: devices and projects, with search; shared page pieces |
 | `GitViews.swift` | Git model, branch row and git page |
 | `FileBrowserWindow.swift` | Project file browser: file tree, filter, code view with line numbers |
+| `LogWindow.swift` | Log window: filter bar, level filter, follow, live text view |
 | `MarkdownPreview.swift` | Rendered Markdown for the file browser |
 | `DockPresence.swift` | Shows the Dock icon while an app window is open |
 | `SyntaxHighlighter.swift` | Syntax colouring for the file browser |

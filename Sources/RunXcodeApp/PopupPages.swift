@@ -354,7 +354,38 @@ struct ProjectsPage: View {
                 .padding(.bottom, 4)
             }
             .frame(maxHeight: .infinity)
+
+            // Always visible under the list.
+            Divider()
+            addFolderRow
         }
+    }
+
+    private var addFolderRow: some View {
+        Button {
+            projects.presentAddPanel()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "plus.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.tint)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Add Folder…")
+                    Text("Projects inside are detected automatically")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if projects.isScanning {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .listRow()
+        .help("Add a folder with Xcode, Flutter or Android projects")
     }
 
     private var archivedHeader: some View {
