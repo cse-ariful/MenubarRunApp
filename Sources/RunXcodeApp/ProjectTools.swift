@@ -29,6 +29,7 @@ struct ProjectToolsMenu: View {
             case .flutter: flutterItems
             case .workspace, .project: xcodeItems
             case .android: androidItems
+            case .web: webItems
             }
             Divider()
             Button("Run Options…", action: openOptions)
@@ -308,6 +309,51 @@ struct ProjectToolsMenu: View {
         )
     }
 
+    // MARK: Web
+
+    @ViewBuilder
+    private var webItems: some View {
+        if let url = session?.webURL {
+            Section("Dev Server") {
+                Button("Open \(url.absoluteString)") { NSWorkspace.shared.open(url) }
+                Button("Copy URL") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(url.absoluteString, forType: .string)
+                    report("Copied \(url.absoluteString)", false)
+                }
+            }
+        }
+
+        let directory = project.directory
+        let manager = WebProject.manager(in: directory)
+        let scripts = WebProject.scripts(in: directory)
+        Section("Project") {
+            if FileManager.default.fileExists(atPath: directory.appendingPathComponent("package.json").path) {
+                Button("Install Dependencies (\(manager.install))") {
+                    shellTool(manager.install, done: "Dependencies installed")
+                }
+            }
+            if !scripts.isEmpty {
+                Menu("Run Script") {
+                    ForEach(scripts, id: \.name) { script in
+                        Button("\(script.name)  —  \(script.command)") {
+                            shellTool(manager.run(script.name), done: "\(script.name) finished")
+                        }
+                    }
+                }
+            }
+        }
+        .disabled(isRunning)
+    }
+
+    /// Runs a shell command in the project folder as a job (output in the log).
+    private func shellTool(_ command: String, done: String) {
+        runner.session(ensuring: project).runTool(
+            command, executable: "/bin/sh", arguments: ["-c", command], in: project.directory,
+            environment: ["FORCE_COLOR": "0", "BROWSER": "none"], display: command, showArguments: false, done: done
+        )
+    }
+
     // MARK: Helpers
 
     private func quick(_ title: String, _ arguments: [String], executable: String = Shell.xcrunPath,
@@ -349,6 +395,7 @@ struct RunOptionsPage: View {
                         case .flutter: flutterFields(project)
                         case .workspace, .project: xcodeFields(project)
                         case .android: androidFields(project)
+                        case .web: webFields(project)
                         }
                         HStack {
                             Spacer()
@@ -483,6 +530,26 @@ struct RunOptionsPage: View {
         field("Port forwarding", "Ports for adb reverse after install, so the app can reach servers on this Mac.") {
             TextField("e.g. 8080 3000", text: binding(project, \.reversePorts))
                 .textFieldStyle(.roundedBorder)
+        }
+    }
+
+    // MARK: Web
+
+    @ViewBuilder
+    private func webFields(_ project: XcodeProject) -> some View {
+        let detected = WebProject.defaultCommand(in: project.directory)
+        field("Dev server command",
+              detected.isEmpty ? "Runs in the project folder with your shell's PATH."
+                               : "Leave empty to use the detected command: \(detected)") {
+            TextField(detected.isEmpty ? "e.g. npm run dev" : detected, text: binding(project, \.webCommand))
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.callout, design: .monospaced))
+        }
+        field("Browser", "Opens the first localhost URL the server prints. The Open button works either way.") {
+            Toggle("Open in browser when the server is ready", isOn: binding(project, \.openBrowserWhenReady))
+        }
+        field("Environment", "One KEY=VALUE per line, e.g. PORT=3001.") {
+            multiline(binding(project, \.environment), placeholder: "PORT=3001")
         }
     }
 

@@ -84,7 +84,7 @@ final class ProjectStore: ObservableObject {
     func presentAddPanel() {
         let panel = NSOpenPanel()
         panel.title = "Add Apple Projects Folder"
-        panel.message = "Choose folders containing Xcode, Flutter or Android projects (or pick a project directly)."
+        panel.message = "Choose folders containing Xcode, Flutter, Android or web projects (or pick a project directly)."
         panel.prompt = "Add"
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
@@ -262,7 +262,7 @@ final class ProjectStore: ObservableObject {
     }
 }
 
-/// Walks tracked folders looking for Xcode workspaces/projects, Flutter apps and Android (Gradle) apps.
+/// Walks tracked folders looking for Xcode workspaces/projects, Flutter apps, Android (Gradle) apps and web apps.
 enum ProjectScanner {
     private static let skippedDirectories: Set<String> = [
         "Pods", "Carthage", "node_modules", "DerivedData", "build", "Build",
@@ -295,7 +295,10 @@ enum ProjectScanner {
         }
     }
 
-    private static func walk(_ directory: URL, depth: Int, maxDepth: Int, into found: inout [XcodeProject]) {
+    /// `webAllowed` is false inside a web project, so a monorepo lists its root once,
+    /// not every package that has a dev script.
+    private static func walk(_ directory: URL, depth: Int, maxDepth: Int, webAllowed: Bool = true,
+                             into found: inout [XcodeProject]) {
         guard depth <= maxDepth else { return }
 
         // Flutter app: its ios/ and android/ folders belong to it, so don't list them separately.
@@ -307,6 +310,12 @@ enum ProjectScanner {
         let androidModule = androidAppModule(in: directory)
         if let androidModule {
             found.append(XcodeProject(url: directory, kind: .android, androidModule: androidModule))
+        }
+        // Web app (dev server). Keep walking so e.g. a React Native/Capacitor ios/ project is still found.
+        var webAllowed = webAllowed
+        if webAllowed, androidModule == nil, WebProject.isWebApp(directory) {
+            found.append(XcodeProject(url: directory, kind: .web))
+            webAllowed = false
         }
         let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey]
         guard let entries = try? FileManager.default.contentsOfDirectory(
@@ -345,7 +354,7 @@ enum ProjectScanner {
                subdirectory.lastPathComponent == androidModule || androidModuleNames.contains(subdirectory.lastPathComponent) {
                 continue
             }
-            walk(subdirectory, depth: depth + 1, maxDepth: maxDepth, into: &found)
+            walk(subdirectory, depth: depth + 1, maxDepth: maxDepth, webAllowed: webAllowed, into: &found)
         }
     }
 

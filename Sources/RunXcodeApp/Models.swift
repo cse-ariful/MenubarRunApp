@@ -72,9 +72,11 @@ struct XcodeProject: Identifiable, Hashable {
         case project
         case flutter
         case android
+        /// A web app with a dev server (package.json scripts, Django, Rails, Laravel).
+        case web
     }
 
-    /// Xcode: the .xcworkspace/.xcodeproj. Flutter/Android: the project root folder.
+    /// Xcode: the .xcworkspace/.xcodeproj. Flutter/Android/Web: the project root folder.
     let url: URL
     let kind: Kind
     /// Android: the Gradle module that applies com.android.application (usually "app").
@@ -93,6 +95,7 @@ struct XcodeProject: Identifiable, Hashable {
         case .workspace, .project: return "Xcode"
         case .flutter: return "Flutter"
         case .android: return "Android"
+        case .web: return "Web"
         }
     }
 
@@ -102,6 +105,7 @@ struct XcodeProject: Identifiable, Hashable {
         case .project: return "hammer.fill"
         case .flutter: return "bird.fill"
         case .android: return "cube.fill"
+        case .web: return "globe"
         }
     }
 
@@ -111,6 +115,7 @@ struct XcodeProject: Identifiable, Hashable {
         case .workspace, .project: return destination.isApple
         case .android: return destination.isAndroid
         case .flutter: return destination.kind != .simulator || destination.platform == "iOS" || destination.platform == "iPadOS"
+        case .web: return false  // runs a local dev server, no device
         }
     }
 
@@ -119,6 +124,7 @@ struct XcodeProject: Identifiable, Hashable {
         case .workspace, .project: return "Select an Apple simulator or device"
         case .android: return "Select an Android emulator or device"
         case .flutter: return "Select an iOS simulator, a device or an Android emulator"
+        case .web: return "Web projects run a local dev server"
         }
     }
 }
@@ -214,6 +220,12 @@ struct RunOptions: Codable, Equatable {
     /// Ports for `adb reverse`, e.g. "8081 3000".
     var reversePorts = ""
 
+    // Web
+    /// Dev server command (empty: the detected one, e.g. "pnpm dev").
+    var webCommand = ""
+    /// Open the dev server's URL in the browser once it prints one.
+    var openBrowserWhenReady = true
+
     init() {}
 
     // Tolerate settings saved by older/newer versions (missing keys keep their defaults).
@@ -229,6 +241,8 @@ struct RunOptions: Codable, Equatable {
         customLocation = (try? c.decode(String.self, forKey: .customLocation)) ?? ""
         androidVariant = (try? c.decode(String.self, forKey: .androidVariant)) ?? ""
         reversePorts = (try? c.decode(String.self, forKey: .reversePorts)) ?? ""
+        webCommand = (try? c.decode(String.self, forKey: .webCommand)) ?? ""
+        openBrowserWhenReady = (try? c.decode(Bool.self, forKey: .openBrowserWhenReady)) ?? true
     }
 
     // MARK: Parsed values
@@ -277,6 +291,8 @@ struct RunOptions: Codable, Equatable {
             if !configuration.isEmpty { parts.append(configuration) }
         case .android:
             if !androidVariant.isEmpty { parts.append(androidVariant) }
+        case .web:
+            break
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }

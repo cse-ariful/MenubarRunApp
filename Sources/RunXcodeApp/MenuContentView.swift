@@ -3,8 +3,8 @@ import ServiceManagement
 import SwiftUI
 
 /// The popup, top to bottom:
-///   1. target device of the selected project (click: devices page)
-///   2. selected project (click: projects page, searchable, most recently used first)
+///   1. selected project (click: projects page, searchable, most recently used first)
+///   2. target device of the selected project (click: devices page), or the dev server for web projects
 ///   3. git branch row (click: git page) and actions for the selected project:
 ///      run/stop, hot reload, logs, screenshot, open in IDE… (several projects can run at once)
 ///   4. Add Folder (⋯ menu: folders, settings)   5. Quit
@@ -88,14 +88,6 @@ struct MenuContentView: View {
 
     private var mainContent: some View {
         VStack(alignment: .leading, spacing: 0) {
-            SimulatorRow { show(.devices) }
-            if let project = projects.selectedProject {
-                RunControls(project: project) { show(.runOptions) }
-                    .padding(.horizontal, 8)
-                    .padding(.top, 4)
-                    .padding(.bottom, 2)
-            }
-            RowDivider()
             if projects.projects.isEmpty {
                 Text(emptyMessage)
                     .font(.caption)
@@ -105,8 +97,20 @@ struct MenuContentView: View {
                     .padding(.vertical, 12)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
+                // 1. Project, 2. where it runs (device / dev server) with Run, 3. git and actions.
                 ProjectPickerRow { show(.projects) }
+                RowDivider()
+                if let project = projects.selectedProject, project.kind == .web {
+                    // Web projects run a local dev server instead of using a device.
+                    WebServerRow(project: project)
+                } else {
+                    SimulatorRow { show(.devices) }
+                }
                 if let project = projects.selectedProject {
+                    RunControls(project: project) { show(.runOptions) }
+                        .padding(.horizontal, 8)
+                        .padding(.top, 4)
+                        .padding(.bottom, 2)
                     RowDivider()
                     ActionsSection(project: project) { show(.git) }
                 }
@@ -120,9 +124,9 @@ struct MenuContentView: View {
 
     private var emptyMessage: String {
         if projects.folders.isEmpty {
-            return "No projects yet. Add a folder with your Xcode, Flutter or Android projects. They're detected automatically."
+            return "No projects yet. Add a folder with your Xcode, Flutter, Android or web projects. They're detected automatically."
         }
-        return projects.isScanning ? "Scanning folders…" : "No Xcode, Flutter or Android projects found in the tracked folders."
+        return projects.isScanning ? "Scanning folders…" : "No Xcode, Flutter, Android or web projects found in the tracked folders."
     }
 }
 
@@ -452,6 +456,10 @@ struct ProjectRow: View {
     }
 
     private var caption: String {
+        if project.kind == .web {
+            let command = WebProject.command(for: project, options: projects.runOptions(for: project))
+            return "Web · " + (command.isEmpty ? "no dev command" : command)
+        }
         let kind = project.isXcode ? (projects.selectedScheme(for: project) ?? "Xcode") : project.kindLabel
         return "\(kind) · → \(destination?.name ?? "no device")"
     }
@@ -530,6 +538,10 @@ private struct RunControls: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if project.kind == .web {
+                WebCommandField(project: project)
+            }
+
             primaryButtons
 
             if !isRunningThis, let blocker = runBlocker {
@@ -585,6 +597,27 @@ private struct RunControls: View {
                     .controlSize(.large)
                     .keyboardShortcut("r", modifiers: [.command, .shift])
                     .help("Hot restart (⇧⌘R)")
+                } else if session?.phase == .streaming, project.kind == .web {
+                    // Web: Stop · Open · Restart
+                    if let url = session?.webURL {
+                        Button {
+                            NSWorkspace.shared.open(url)
+                        } label: {
+                            Label("Open", systemImage: "safari").frame(maxWidth: .infinity)
+                        }
+                        .controlSize(.large)
+                        .keyboardShortcut("o", modifiers: .command)
+                        .help("Open \(url.absoluteString) (⌘O)")
+                    }
+                    Button {
+                        run()
+                    } label: {
+                        Label("Restart", systemImage: "arrow.clockwise").frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.large)
+                    .keyboardShortcut("r", modifiers: .command)
+                    .disabled(runBlocker != nil)
+                    .help("Stop the dev server and start it again (⌘R)")
                 } else if session?.phase == .streaming {
                     // Rebuild and relaunch; the current app and its log stream are stopped first.
                     Button {
@@ -620,12 +653,20 @@ private struct RunControls: View {
     }
 
     private var runTitle: String {
+        if project.kind == .web { return "Start Dev Server" }
         guard let destination else { return "Run" }
         let suffix = projects.runOptions(for: project).runSuffix(for: project).map { " · \($0)" } ?? ""
         return "Run on \(destination.name)" + suffix
     }
 
+    private var webCommand: String {
+        WebProject.command(for: project, options: projects.runOptions(for: project))
+    }
+
     private var runBlocker: String? {
+        if project.kind == .web {
+            return webCommand.isEmpty ? "Enter the command that starts the dev server" : nil
+        }
         guard let destination else { return project.unsupportedDestinationHint }
         if !project.supports(destination) { return project.unsupportedDestinationHint }
         if destination.isOffline { return "\(destination.name) is offline" }
@@ -634,7 +675,13 @@ private struct RunControls: View {
     }
 
     private func run() {
-        guard runBlocker == nil, let destination else { return }
+        guard runBlocker == nil else { return }
+        if project.kind == .web {
+            projects.markUsed(project)
+            runner.runWeb(project: project, command: webCommand, options: projects.runOptions(for: project))
+            return
+        }
+        guard let destination else { return }
         projects.markUsed(project)
         runner.run(project: project, scheme: project.isXcode ? scheme : nil, simulator: destination,
                    options: projects.runOptions(for: project))

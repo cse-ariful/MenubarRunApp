@@ -117,6 +117,9 @@ enum DeviceTools {
         case .flutter:
             return appURL(vsCode) != nil ? ("Open in VS Code", "chevron.left.forwardslash.chevron.right")
                                          : ("Open in Android Studio", "cube")
+        case .web:
+            return appURL(vsCode) != nil ? ("Open in VS Code", "chevron.left.forwardslash.chevron.right")
+                                         : ("Open Folder", "folder")
         }
     }
 
@@ -128,6 +131,8 @@ enum DeviceTools {
             open(project.url, with: androidStudio)
         case .flutter:
             open(project.url, with: appURL(vsCode) != nil ? vsCode : androidStudio)
+        case .web:
+            if appURL(vsCode) != nil { open(project.url, with: vsCode) } else { NSWorkspace.shared.open(project.url) }
         }
     }
 

@@ -30,6 +30,18 @@ enum RunError: LocalizedError {
 final class BuildRunner: ObservableObject {
     @Published private(set) var sessions: [String: RunSession] = [:]
     private var subscriptions: [String: AnyCancellable] = [:]
+    private var quitObserver: NSObjectProtocol?
+
+    init() {
+        // Don't leave dev servers running (and holding their ports) after the app quits.
+        quitObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.sessions.values.forEach { $0.terminateWebServerNow() }
+            }
+        }
+    }
 
     let logsDirectory: URL = {
         let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
@@ -49,6 +61,11 @@ final class BuildRunner: ObservableObject {
 
     func run(project: XcodeProject, scheme: String?, simulator: Simulator, options: RunOptions) {
         session(ensuring: project).run(project: project, scheme: scheme, simulator: simulator, options: options)
+    }
+
+    /// Starts a web project's dev server with `command` (run in the project folder).
+    func runWeb(project: XcodeProject, command: String, options: RunOptions) {
+        session(ensuring: project).runWeb(project: project, command: command, options: options)
     }
 
     /// The project's session, created on first use (tools can run before the first Run).
@@ -124,6 +141,12 @@ final class RunSession: ObservableObject {
 
     /// The app launched by the last run, for Relaunch / Restart and the device tools.
     @Published private(set) var lastLaunch: LaunchTarget?
+    /// Web: the dev server's URL once it prints one.
+    @Published private(set) var webURL: URL?
+    /// True while a web dev server runs (Stop signals its whole process tree).
+    private var isWebSession = false
+    private var openBrowserOnReady = false
+
     /// Set from the log window: new runs append to the log instead of clearing it.
     /// Turned off again when the log window closes.
     @Published var preserveLog = false
@@ -184,6 +207,8 @@ final class RunSession: ObservableObject {
                 }
             }
             self.isFlutterSession = false
+            self.isWebSession = false
+            self.webURL = nil
             self.statusDetail = ""
             self.finish()
         }
@@ -198,9 +223,52 @@ final class RunSession: ObservableObject {
             process?.send("q")
             DispatchQueue.global().asyncAfter(deadline: .now() + 3) { process?.interrupt() }
             DispatchQueue.global().asyncAfter(deadline: .now() + 6) { process?.terminate() }
+        } else if isWebSession, let pid = process?.processIdentifier, pid > 0 {
+            // sh → npm → node…: signal the whole tree so the server really stops and frees its port.
+            ProcessTree.terminate(pid)
         } else {
             process?.interrupt()
             DispatchQueue.global().asyncAfter(deadline: .now() + 4) { process?.terminate() }
+        }
+    }
+
+    /// App is quitting: stop a running dev server right away.
+    func terminateWebServerNow() {
+        guard isWebSession, let pid = currentProcess?.processIdentifier, pid > 0 else { return }
+        ProcessTree.terminateNow(pid)
+    }
+
+    // MARK: - Web dev server
+
+    func runWeb(project: XcodeProject, command: String, options: RunOptions) {
+        start(description: "\(project.displayName) · \(command)", resetLog: true) { session in
+            try await session.runWebServer(project: project, command: command, options: options)
+        }
+    }
+
+    private func runWebServer(project: XcodeProject, command: String, options: RunOptions) async throws {
+        append("▶ \(command)")
+        append("  \(project.directory.path)")
+        isWebSession = true
+        webURL = nil
+        openBrowserOnReady = options.openBrowserWhenReady
+        phase = .streaming
+        statusDetail = "Starting dev server…"
+
+        var environment = options.environmentPairs
+        environment["BROWSER"] = "none"      // we open the browser ourselves (Open, or "open when ready")
+        environment["FORCE_COLOR"] = "0"     // plain output in the log window
+        let status = await stream("/bin/sh", ["-c", command], in: project.directory, environment: environment,
+                                  display: command, showArguments: false)
+        isWebSession = false
+        webURL = nil
+        if Task.isCancelled { throw CancellationError() }
+        if status == 0 {
+            append("■ Dev server exited")
+            phase = .cancelled
+        } else {
+            throw RunError.toolMissing("The dev server exited with status \(status)."
+                                       + (firstError.map { " \($0)" } ?? " See the log for details."))
         }
     }
 
@@ -259,12 +327,12 @@ final class RunSession: ObservableObject {
 
     /// Streams a long command (e.g. `flutter clean`) into the log as this session's job.
     func runTool(_ title: String, executable: String, arguments: [String], in directory: URL,
-                 environment: [String: String] = [:], display: String, done: String) {
+                 environment: [String: String] = [:], display: String, showArguments: Bool = true, done: String) {
         start(description: title, resetLog: false) { session in
             session.append("▶ \(title)")
             session.phase = .building
             let status = await session.stream(executable, arguments, in: directory, environment: environment,
-                                              display: display)
+                                              display: display, showArguments: showArguments)
             try Task.checkCancellation()
             guard status == 0 else {
                 throw RunError.buildFailed(status: status, firstError: session.firstError)
@@ -328,6 +396,8 @@ final class RunSession: ObservableObject {
             try await runFlutter(project: project, destination: simulator, options: options)
         case .android:
             try await runAndroid(project: project, destination: simulator, options: options)
+        case .web:
+            throw RunError.toolMissing("Web projects start with their dev server command.")
         }
     }
 
@@ -811,7 +881,16 @@ final class RunSession: ObservableObject {
     }
 
     private func ingest(_ raw: String) {
-        let line = raw.replacingOccurrences(of: "\r", with: "")
+        var line = raw.replacingOccurrences(of: "\r", with: "")
+        // Colour/cursor escape codes (Vite, Next, Gradle…) would show up as junk in the log window.
+        if line.contains("\u{1B}") {
+            line = line.replacingOccurrences(of: "\u{1B}\\[[0-9;?]*[A-Za-z]", with: "", options: .regularExpression)
+        }
+        if isWebSession, webURL == nil, let url = WebProject.url(in: line) {
+            webURL = url
+            statusDetail = "Dev server · \(url.absoluteString)"
+            if openBrowserOnReady { NSWorkspace.shared.open(url) }
+        }
         if let data = (line + "\n").data(using: .utf8) {
             try? logHandle?.write(contentsOf: data)
         }

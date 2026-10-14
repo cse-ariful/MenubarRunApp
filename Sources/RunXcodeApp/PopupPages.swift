@@ -386,7 +386,7 @@ struct ProjectsPage: View {
         }
         .buttonStyle(.plain)
         .listRow()
-        .help("Add a folder with Xcode, Flutter or Android projects")
+        .help("Add a folder with Xcode, Flutter, Android or web projects")
     }
 
     private var archivedHeader: some View {

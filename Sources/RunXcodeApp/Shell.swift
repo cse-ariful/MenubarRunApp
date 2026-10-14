@@ -260,6 +260,9 @@ final class StreamingProcess: @unchecked Sendable {
 
     var isRunning: Bool { process.isRunning }
 
+    /// 0 until the process has started.
+    var processIdentifier: Int32 { process.isRunning ? process.processIdentifier : 0 }
+
     /// SIGINT – lets xcodebuild cancel cleanly.
     func interrupt() {
         if process.isRunning { process.interrupt() }
