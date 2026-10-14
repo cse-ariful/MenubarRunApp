@@ -163,7 +163,7 @@ final class RunSession: ObservableObject {
     // MARK: - Pipeline
 
     private func perform(project: XcodeProject, scheme: String?, simulator: Simulator, configuration: String) async {
-        append("▶ \(scheme ?? project.kindLabel) (\(configuration)) on \(simulator.name) — \(simulator.runtimeName)")
+        append("▶ \(scheme ?? project.kindLabel) on \(simulator.name) — \(simulator.runtimeName)")
         append("  \(project.url.path)")
 
         do {
@@ -199,10 +199,18 @@ final class RunSession: ObservableObject {
             try await Shell.run(Shell.xcrunPath, ["simctl", "bootstatus", udid, "-b"])
         }
 
+        // Use the configuration the scheme's Run action builds (e.g. "Debug-Staging"), like Xcode's ▶ does.
+        let container = project.url
+        let launch = await Task.detached { SchemeLaunchInfo.load(scheme: scheme, near: container) }.value
+        let buildConfiguration = launch.configuration ?? configuration
+        append("Scheme: \(scheme) · Configuration: \(buildConfiguration)"
+               + (launch.configuration == nil ? " (scheme file not found, using default)" : "")
+               + (launch.target.map { " · Runs: \($0)" } ?? ""))
+
         let base = [
             "xcodebuild", project.containerFlag, project.url.path,
             "-scheme", scheme,
-            "-configuration", configuration,
+            "-configuration", buildConfiguration,
             "-destination", "id=\(udid)",
         ]
 
@@ -218,7 +226,8 @@ final class RunSession: ObservableObject {
         guard status == 0 else { throw RunError.buildFailed(status: status, firstError: firstError) }
 
         phase = .preparing
-        let product = try await locateProduct(base: base, scheme: scheme, in: project.directory)
+        let product = try await locateProduct(base: base, preferredTargets: [launch.target, scheme].compactMap { $0 },
+                                              in: project.directory)
         append("App: \(product.appURL.path)")
         append("Bundle ID: \(product.bundleIdentifier)")
         try Task.checkCancellation()
@@ -396,7 +405,7 @@ final class RunSession: ObservableObject {
         let buildSettings: [String: String]
     }
 
-    private func locateProduct(base: [String], scheme: String, in directory: URL) async throws -> BuiltProduct {
+    private func locateProduct(base: [String], preferredTargets: [String], in directory: URL) async throws -> BuiltProduct {
         append("Reading build settings…")
         let result = try await Shell.run(Shell.xcrunPath, base + ["-showBuildSettings", "-json"], currentDirectory: directory)
         let output = result.stdout
@@ -406,10 +415,14 @@ final class RunSession: ObservableObject {
         }
         let entries = try JSONDecoder().decode([SettingsEntry].self, from: Data(output[start...end].utf8))
 
-        // Prefer the target named like the scheme; skip non-app products (frameworks, tests…).
+        // Prefer the target the scheme launches, then one named like the scheme;
+        // skip non-app products (frameworks, tests…).
+        func rank(_ entry: SettingsEntry) -> Int {
+            entry.target.flatMap { preferredTargets.firstIndex(of: $0) } ?? preferredTargets.count
+        }
         let apps = entries
             .filter { $0.buildSettings["WRAPPER_EXTENSION"] == "app" }
-            .sorted { ($0.target == scheme ? 0 : 1) < ($1.target == scheme ? 0 : 1) }
+            .sorted { rank($0) < rank($1) }
 
         for entry in apps {
             let settings = entry.buildSettings
@@ -535,5 +548,62 @@ final class RunSession: ObservableObject {
         let special = CharacterSet(charactersIn: " \"'$`\\()&;|<>*?![]{}")
         guard value.rangeOfCharacter(from: special) != nil else { return value }
         return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
+/// What a scheme's Run (Launch) action uses, read from its `.xcscheme` file.
+struct SchemeLaunchInfo {
+    /// e.g. "Debug" or "Debug-Staging".
+    var configuration: String?
+    /// Target the Run action launches (`BlueprintName`).
+    var target: String?
+
+    /// Looks for `<scheme>.xcscheme` in the project/workspace's shared and user scheme folders,
+    /// then anywhere under the project's folder (skipping Pods and build output).
+    static func load(scheme: String, near container: URL) -> SchemeLaunchInfo {
+        guard let file = schemeFile(named: scheme, near: container),
+              let document = try? XMLDocument(contentsOf: file, options: []) else {
+            return SchemeLaunchInfo()
+        }
+        func attribute(_ xpath: String) -> String? {
+            let value = (try? document.nodes(forXPath: xpath))?.first?.stringValue?
+                .trimmingCharacters(in: .whitespaces)
+            return value?.isEmpty == false ? value : nil
+        }
+        return SchemeLaunchInfo(
+            configuration: attribute("/Scheme/LaunchAction/@buildConfiguration"),
+            target: attribute("/Scheme/LaunchAction/BuildableProductRunnable/BuildableReference/@BlueprintName")
+                ?? attribute("/Scheme/LaunchAction/MacroExpansion/BuildableReference/@BlueprintName")
+        )
+    }
+
+    private static func schemeFile(named scheme: String, near container: URL) -> URL? {
+        let fm = FileManager.default
+        let name = "\(scheme).xcscheme"
+
+        // 1. The container itself: shared schemes first, then the user's own.
+        var candidates = [container.appendingPathComponent("xcshareddata/xcschemes/\(name)")]
+        let userData = container.appendingPathComponent("xcuserdata")
+        if let users = try? fm.contentsOfDirectory(at: userData, includingPropertiesForKeys: nil) {
+            candidates += users.map { $0.appendingPathComponent("xcschemes/\(name)") }
+        }
+        if let hit = candidates.first(where: { fm.fileExists(atPath: $0.path) }) { return hit }
+
+        // 2. Workspaces: the scheme usually lives in one of the referenced .xcodeproj bundles.
+        let root = container.deletingLastPathComponent()
+        let skipped: Set<String> = ["Pods", "DerivedData", "build", ".build", "node_modules", ".git", "Carthage"]
+        guard let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey],
+                                         options: [.skipsHiddenFiles]) else { return nil }
+        var userMatch: URL?
+        for case let url as URL in walker {
+            if skipped.contains(url.lastPathComponent) || walker.level > 6 {
+                walker.skipDescendants()
+                continue
+            }
+            guard url.lastPathComponent == name else { continue }
+            if url.path.contains("/xcshareddata/") { return url }
+            userMatch = userMatch ?? url
+        }
+        return userMatch
     }
 }

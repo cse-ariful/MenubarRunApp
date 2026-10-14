@@ -89,7 +89,7 @@ You can also open `Package.swift` in Xcode and press Run. The app only appears i
 ## How a run works
 
 1. `xcrun simctl bootstatus <udid> -b` boots the simulator, in parallel with step 2.
-2. `xcodebuild -workspace|-project … -scheme … -configuration Debug -destination id=<udid> build`
+2. `xcodebuild -workspace|-project … -scheme <selected> -configuration <scheme's Run configuration> -destination id=<udid> build`. The configuration (for example `Debug-Staging`) and the launched target come from the scheme's `.xcscheme` file, the same as pressing ▶ in Xcode; if the file can't be found, `Debug` is used. The log's first lines show which scheme and configuration were used.
 3. `xcodebuild … -showBuildSettings -json` finds `TARGET_BUILD_DIR/FULL_PRODUCT_NAME` for the app target.
 4. `xcrun simctl install <udid> <App.app>`
 5. `xcrun simctl launch --terminate-running-process <udid> <bundle id>`
