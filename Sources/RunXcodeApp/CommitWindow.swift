@@ -63,6 +63,11 @@ private struct CommitView: View {
     @State private var loading = true
     @State private var committing = false
     @State private var error: String? = nil
+    /// "Committing…" / "Pushing to origin/main…" while working.
+    @State private var progress: String? = nil
+    /// Where Commit & Push goes, e.g. "origin/main" (nil when detached or not a branch).
+    @State private var pushTarget: String? = nil
+    @State private var hasUpstream = true
 
     private var selectedChanges: [GitChange] { changes.filter { selected.contains($0.id) } }
     private var canCommit: Bool {
@@ -263,6 +268,10 @@ private struct CommitView: View {
                         .font(.callout)
                         .lineLimit(3)
                         .textSelection(.enabled)
+                } else if let progress {
+                    Text(progress)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 } else {
                     Text("Commits only the checked files to \(branch).")
                         .font(.callout)
@@ -272,8 +281,15 @@ private struct CommitView: View {
                 if committing { ProgressView().controlSize(.small) }
                 Button("Cancel", action: close)
                     .keyboardShortcut(.cancelAction)
+                Button("Commit & Push") {
+                    commit(push: true)
+                }
+                .keyboardShortcut(.return, modifiers: [.command, .shift])
+                .disabled(!canCommit || pushTarget == nil)
+                .help(pushTarget.map { "Commit, then push to \($0)" + (hasUpstream ? "" : " (sets the upstream)") + " (⇧⌘↩)" }
+                      ?? "Can't push from a detached HEAD")
                 Button(selected.count == 1 ? "Commit 1 File" : "Commit \(selected.count) Files") {
-                    commit()
+                    commit(push: false)
                 }
                 .keyboardShortcut(.return, modifiers: .command)
                 .buttonStyle(.borderedProminent)
@@ -288,6 +304,12 @@ private struct CommitView: View {
 
     private func reload() async {
         loading = true
+        if let status = await Git.status(for: root), !status.isDetached {
+            pushTarget = Git.pushTarget(status)
+            hasUpstream = status.upstream != nil
+        } else {
+            pushTarget = nil
+        }
         do {
             let fresh = try await Git.changes(in: root)
             let known = Set(changes.map(\.id))
@@ -314,22 +336,48 @@ private struct CommitView: View {
         if focused == id { diff = text }
     }
 
-    private func commit() {
+    /// Commits the checked files; with `push`, pushes the branch afterwards
+    /// (`git push`, or `git push -u <remote> <branch>` the first time).
+    private func commit(push: Bool) {
         guard canCommit else { return }
         committing = true
         error = nil
+        progress = "Committing…"
         let picked = selectedChanges
         Task {
             do {
                 try await Git.commit(picked, message: message, in: root)
-                NotificationCenter.default.post(name: .gitRepositoryChanged, object: root)
-                committing = false
-                close()
             } catch {
                 self.error = error.localizedDescription
                 committing = false
+                progress = nil
                 await reload()
+                return
             }
+
+            if push {
+                do {
+                    guard let status = await Git.status(for: root) else {
+                        throw GitError.failed(command: "status", output: "Couldn't read the repository.")
+                    }
+                    progress = "Pushing to \(Git.pushTarget(status))…"
+                    try await Git.push(status)
+                } catch {
+                    // The commit is made; keep the window open with the push error.
+                    NotificationCenter.default.post(name: .gitRepositoryChanged, object: root)
+                    self.error = "Committed, but the push failed: \(error.localizedDescription)"
+                    committing = false
+                    progress = nil
+                    message = ""
+                    await reload()
+                    return
+                }
+            }
+
+            NotificationCenter.default.post(name: .gitRepositoryChanged, object: root, userInfo: ["pushed": push])
+            committing = false
+            progress = nil
+            close()
         }
     }
 }

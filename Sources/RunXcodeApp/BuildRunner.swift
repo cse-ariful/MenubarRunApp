@@ -59,12 +59,19 @@ final class BuildRunner: ObservableObject {
     /// Sessions still building / installing / launching (not just streaming an app's logs).
     var buildingCount: Int { sessions.values.filter { $0.phase.isBuilding }.count }
 
+    /// The project run most recently (⇧⌘R runs it again). Remembered across launches.
+    private(set) var lastRunProjectID: String? = UserDefaults.standard.string(forKey: "lastRunProjectID") {
+        didSet { UserDefaults.standard.set(lastRunProjectID, forKey: "lastRunProjectID") }
+    }
+
     func run(project: XcodeProject, scheme: String?, simulator: Simulator, options: RunOptions) {
+        lastRunProjectID = project.id
         session(ensuring: project).run(project: project, scheme: scheme, simulator: simulator, options: options)
     }
 
     /// Starts a web project's dev server with `command` (run in the project folder).
     func runWeb(project: XcodeProject, command: String, options: RunOptions) {
+        lastRunProjectID = project.id
         session(ensuring: project).runWeb(project: project, command: command, options: options)
     }
 
@@ -270,6 +277,21 @@ final class RunSession: ObservableObject {
             throw RunError.toolMissing("The dev server exited with status \(status)."
                                        + (firstError.map { " \($0)" } ?? " See the log for details."))
         }
+    }
+
+    /// Stops whatever runs (if anything) and returns once it has finished.
+    func stopAndWait() async {
+        guard isRunning else { return }
+        let task = runTask
+        stop()
+        await task?.value
+    }
+
+    /// Shows why a run couldn't start (e.g. from the ⇧⌘R shortcut) as a failure in the popup.
+    func reportProblem(_ text: String) {
+        guard !isRunning else { return }
+        append("✗ \(text)")
+        phase = .failed(text)
     }
 
     /// Dismisses a failed run's message in the popup (the log keeps the details).

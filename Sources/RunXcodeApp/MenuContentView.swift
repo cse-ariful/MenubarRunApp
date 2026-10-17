@@ -21,6 +21,8 @@ struct MenuContentView: View {
     /// Height of the main view; pages use it so the popup doesn't resize while switching.
     @State private var mainHeight: CGFloat = 0
     @Namespace private var rowNamespace
+    /// The popup's own window, to refresh git status each time it opens.
+    @State private var hostWindow = HostWindowBox()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -49,6 +51,15 @@ struct MenuContentView: View {
         .task(id: projects.selectedProject?.id) { await git.load(projects.selectedProject) }
         .onAppear {
             Task { await simulators.refresh(silent: true) }
+            git.refreshOnOpen()
+            // Normally registered at launch by the menu bar icon; this is a fallback (re-registering is harmless).
+            QuickRun.registerShortcut(projects: projects, simulators: simulators, runner: runner)
+        }
+        // The popup window is reused, so onAppear doesn't fire on every open; its window becoming key does.
+        .background(HostWindowReader(box: hostWindow))
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
+            guard let window = note.object as? NSWindow, window === hostWindow.window else { return }
+            git.refreshOnOpen()
         }
         // Closing the popup returns to the main view next time.
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
@@ -604,8 +615,7 @@ private struct RunControls: View {
                         Label("Restart", systemImage: "arrow.clockwise").frame(maxWidth: .infinity)
                     }
                     .controlSize(.large)
-                    .keyboardShortcut("r", modifiers: [.command, .shift])
-                    .help("Hot restart (⇧⌘R)")
+                    .help("Hot restart")
                 } else if session?.phase == .streaming, project.kind == .web {
                     // Web: Stop · Open · Restart
                     if let url = session?.webURL {
@@ -651,6 +661,7 @@ private struct RunControls: View {
                 .controlSize(.large)
                 .keyboardShortcut("r", modifiers: .command)
                 .disabled(runBlocker != nil)
+                .help("Run (⌘R). From any app, ⇧⌘R runs the last-run project again.")
             }
 
             if !isRunningThis || phase == .attached || phase == .streaming {
@@ -1165,5 +1176,34 @@ private struct ElapsedText: View {
     static func format(_ interval: TimeInterval) -> String {
         let seconds = max(0, Int(interval))
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+}
+
+/// Holds the window a SwiftUI view is in.
+final class HostWindowBox {
+    weak var window: NSWindow?
+}
+
+/// Reports the hosting NSWindow of the view it's attached to.
+struct HostWindowReader: NSViewRepresentable {
+    let box: HostWindowBox
+
+    final class ReaderView: NSView {
+        var onWindow: ((NSWindow?) -> Void)?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            onWindow?(window)
+        }
+    }
+
+    func makeNSView(context: Context) -> ReaderView {
+        let view = ReaderView()
+        let box = box
+        view.onWindow = { box.window = $0 }
+        return view
+    }
+
+    func updateNSView(_ nsView: ReaderView, context: Context) {
+        if let window = nsView.window { box.window = window }
     }
 }

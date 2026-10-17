@@ -22,9 +22,11 @@ final class GitModel: ObservableObject {
 
     init() {
         observer = NotificationCenter.default.addObserver(forName: .gitRepositoryChanged, object: nil, queue: .main) { [weak self] note in
+            let pushed = note.userInfo?["pushed"] as? Bool ?? false
             Task { @MainActor in
                 guard let self, let root = note.object as? URL, root == self.status?.root else { return }
-                self.show("Committed to \(self.status?.branch ?? "branch").", error: false)
+                let branch = self.status?.branch ?? "branch"
+                self.show(pushed ? "Committed and pushed \(branch)." : "Committed to \(branch).", error: false)
                 await self.refresh()
             }
         }
@@ -49,7 +51,17 @@ final class GitModel: ObservableObject {
         if directory == target { loaded = true }
     }
 
+    private var lastRefresh = Date.distantPast
+
+    /// Re-reads the status when the popup opens (changes made in an editor or terminal since),
+    /// at most once a second.
+    func refreshOnOpen() {
+        guard directory != nil, busy == nil, Date().timeIntervalSince(lastRefresh) > 1 else { return }
+        Task { await refresh() }
+    }
+
     func refresh() async {
+        lastRefresh = Date()
         guard let directory else {
             status = nil
             return

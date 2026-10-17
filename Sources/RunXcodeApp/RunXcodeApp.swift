@@ -67,6 +67,8 @@ struct RunXcodeAppMain: App {
                 .environmentObject(runner)
         } label: {
             MenuBarLabel(runner: runner)
+                // ⇧⌘R anywhere: run the last-run project again.
+                .onAppear { QuickRun.registerShortcut(projects: projects, simulators: simulators, runner: runner) }
         }
         .menuBarExtraStyle(.window)
     }

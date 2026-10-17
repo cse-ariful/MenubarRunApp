@@ -39,7 +39,7 @@ The popup, top to bottom. The device, project and git rows open **drill-in pages
      - While the status loads, the row shows a spinner and "Reading branch, changes and remotes…" in the same space, so nothing below it jumps. Folders outside a git repository show a dimmed "No git repository" row.
      - The git page has action buttons: **Pull** (`git pull --ff-only`, never creates a merge commit), **Push** (`git push`, or `git push -u origin <branch>` the first time), **Fetch** (`git fetch --all --prune`), **Commit**, **New Branch** (from the current branch, `git switch -c`) and **Refresh**.
      - **Push asks first:** it shows "Push 3 commits to origin/main?" with the commit list, and nothing is sent until you press **Push**.
-     - **Commit** (also a **Commit N Changes…** button under the branch row whenever there are changes) opens a window: changed files with checkboxes on the left, the selected file's diff on the right, and a message box. Only the checked files are committed (⌘↩); anything else you had staged stays staged.
+     - **Commit** (also a **Commit N Changes…** button under the branch row whenever there are changes) opens a window: changed files with checkboxes on the left, the selected file's diff on the right, and a message box. Only the checked files are committed (⌘↩); anything else you had staged stays staged. **Commit & Push** (⇧⌘↩) commits and then pushes the branch (setting the upstream on the first push). If the push fails, the commit is kept and the window stays open with the error.
      - Below the actions, a search field and the branches: **Local Branches** (✓ marks the current one; click another to switch to it) and **Remote Branches**, grouped by remote (click one to check it out with `git switch --track`).
      - **No password prompts:** git never stops to ask for a password. HTTPS uses your Keychain, SSH uses your loaded keys (`ssh-add --apple-use-keychain`), and missing credentials show an error instead of hanging.
 4. **Add Folder…** Its ⋯ menu has tracked folders, removed projects and Launch at Login.
@@ -55,6 +55,8 @@ The popup, top to bottom. The device, project and git rows open **drill-in pages
 The row menu also has Open in Xcode / Android Studio / VS Code and Reveal in Finder.
 
 **Dock:** while a commit, file browser or log window is open, RunXcodeApp shows in the Dock and the ⌘-Tab switcher so you can get back to it. When the last window closes, it goes back to menu bar only.
+
+**Shortcut:** **⇧⌘R** works from any app, even with the popup closed: it runs the project you last ran again, with its saved device, scheme and Run Options (for web projects, its dev server command). If it's still running, it's stopped and started again. If it can't run (for example the device is offline), you hear a beep and the popup shows why. It's a system-wide shortcut, so ⇧⌘R in other apps (such as a browser's hard reload) is taken over while RunXcodeApp runs.
 
 ## Supported projects (auto-detected)
 
@@ -182,6 +184,7 @@ After either one, users install or upgrade with `brew install --cask cse-ariful/
 | `FileBrowserWindow.swift` | Project file browser: file tree, filter, code view with line numbers |
 | `LogWindow.swift` | Log window: filter bar, level filter, follow, live text view |
 | `WebProjects.swift` | Web project detection, dev server command, process-tree stop, dev server row and command field |
+| `HotKey.swift` | Global ⇧⌘R shortcut: re-run the last-run project |
 | `ProjectTools.swift` | ⋯ menu with per-type actions, and the Run Options page |
 | `MarkdownPreview.swift` | Rendered Markdown for the file browser |
 | `DockPresence.swift` | Shows the Dock icon while an app window is open |
